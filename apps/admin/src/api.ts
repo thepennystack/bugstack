@@ -18,6 +18,7 @@ export type App = {
   appId: string;
   name: string;
   description: string;
+  githubAppId: string;
   installationId: number;
   githubRepo: string;
   slack: Slack | null;
@@ -27,6 +28,7 @@ export type App = {
 export type AppInput = {
   name: string;
   description: string;
+  githubAppId: string;
   installationId: number;
   githubRepo: string;
 };
@@ -83,8 +85,24 @@ export type WorkspaceInput = {
 };
 
 export type Installation = {
+  githubAppId: string;
   installationId: number;
   account: string;
+  appSlug: string;
+};
+
+export type GitHubApp = {
+  githubAppId: string;
+  appIdNumber: number;
+  slug: string;
+  name: string;
+  ownerLogin: string;
+  htmlUrl: string;
+  createdAt: string;
+};
+
+export type ManifestState = {
+  state: string;
 };
 
 export class ApiError extends Error {
@@ -119,6 +137,7 @@ const isApp: Guard<App> = (value): value is App =>
   typeof value.appId === "string" &&
   typeof value.name === "string" &&
   typeof value.description === "string" &&
+  typeof value.githubAppId === "string" &&
   typeof value.installationId === "number" &&
   typeof value.githubRepo === "string" &&
   (value.slack === null || isSlack(value.slack)) &&
@@ -162,7 +181,26 @@ const isReportRow: Guard<ReportRow> = (value): value is ReportRow =>
   value.images.every((image: unknown) => typeof image === "string");
 
 const isInstallation: Guard<Installation> = (value): value is Installation =>
-  isRecord(value) && typeof value.installationId === "number" && typeof value.account === "string";
+  isRecord(value) &&
+  typeof value.githubAppId === "string" &&
+  typeof value.installationId === "number" &&
+  typeof value.account === "string" &&
+  typeof value.appSlug === "string";
+
+const isGitHubApp: Guard<GitHubApp> = (value): value is GitHubApp =>
+  isRecord(value) &&
+  typeof value.githubAppId === "string" &&
+  typeof value.appIdNumber === "number" &&
+  typeof value.slug === "string" &&
+  typeof value.name === "string" &&
+  typeof value.ownerLogin === "string" &&
+  typeof value.htmlUrl === "string" &&
+  typeof value.createdAt === "string" &&
+  !("privateKey" in value) &&
+  !("clientSecret" in value);
+
+const isManifestState: Guard<ManifestState> = (value): value is ManifestState =>
+  isRecord(value) && typeof value.state === "string";
 
 const isWorkspace: Guard<Workspace> = (value): value is Workspace =>
   isRecord(value) &&
@@ -194,9 +232,6 @@ const failureBody = async (response: Response): Promise<ErrorBody> => {
 
 export const isUnauthorized = (error: unknown): boolean =>
   error instanceof ApiError && error.status === 401;
-
-export const isSecretMissing = (error: unknown): boolean =>
-  error instanceof ApiError && error.body.reason === "SecretMissing";
 
 const request = async <T>(
   method: string,
@@ -261,8 +296,21 @@ export const retryReport = (reportId: string): Promise<ReportRow> =>
 export const listInstallations = (): Promise<Installation[]> =>
   request("GET", "/api/github/installations", listOf(isInstallation));
 
-export const listRepos = (installationId: number): Promise<string[]> =>
-  request("GET", `/api/github/installations/${installationId}/repos`, listOf(isString));
+export const listRepos = (githubAppId: string, installationId: number): Promise<string[]> =>
+  request(
+    "GET",
+    `/api/github/installations/${installationId}/repos?githubAppId=${encodeURIComponent(githubAppId)}`,
+    listOf(isString),
+  );
+
+export const listGitHubApps = (): Promise<GitHubApp[]> =>
+  request("GET", "/api/github/apps", listOf(isGitHubApp));
+
+export const createManifestState = (): Promise<ManifestState> =>
+  request("POST", "/api/github/apps/state", isManifestState, {});
+
+export const deleteGitHubApp = (githubAppId: string): Promise<undefined> =>
+  request("DELETE", `/api/github/apps/${encodeURIComponent(githubAppId)}`, isEmpty);
 
 export const listWorkspaces = (): Promise<Workspace[]> =>
   request("GET", "/api/slack/workspaces", listOf(isWorkspace));

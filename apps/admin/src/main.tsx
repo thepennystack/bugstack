@@ -3,6 +3,7 @@ import { render } from "preact";
 import { Link, Route, Switch } from "wouter-preact";
 import { getMe, isUnauthorized } from "./api";
 import { AppList, AppPage, EditApp, NewApp } from "./apps";
+import { GitHubApps } from "./github";
 import { Failure, SignedOut } from "./notices";
 import { Workspaces } from "./slack";
 import "./style.css";
@@ -41,6 +42,7 @@ const Shell = () => {
         </Link>
         <nav>
           <Link href="/">Apps</Link>
+          <Link href="/github">GitHub</Link>
           <Link href="/slack">Slack</Link>
         </nav>
         <span class="identity">{me.data?.email ?? (me.isPending ? "Signing in…" : "")}</span>
@@ -51,6 +53,7 @@ const Shell = () => {
         ) : (
           <Switch>
             <Route path="/" component={AppList} />
+            <Route path="/github" component={GitHubApps} />
             <Route path="/slack" component={Workspaces} />
             <Route path="/apps/new" component={NewApp} />
             <Route path="/apps/:appId/edit" component={EditApp} />
