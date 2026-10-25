@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
@@ -13,6 +13,7 @@ const SMOKE_REPO = "thepennystack/bugstack";
 const SMOKE_APP = {
   name: "bugstack-smoke",
   description: "Created by npm run smoke",
+  githubAppId: "",
   installationId: 0,
   githubRepo: SMOKE_REPO,
 };
@@ -78,30 +79,70 @@ const findOrCreateApp = async (origin, wanted) => {
   return created.body;
 };
 
+const smokeGitHubApps = async (origin) => {
+  const apps = await api(origin, "GET", "/api/github/apps");
+  check(
+    `${origin} GET /api/github/apps lists GitHub Apps without secrets`,
+    apps.status === 200 &&
+      Array.isArray(apps.body) &&
+      apps.body.every((app) => !("privateKey" in app) && !("clientSecret" in app)),
+    `${apps.status} ${JSON.stringify(apps.body)}`,
+  );
+
+  const state = await api(origin, "POST", "/api/github/apps/state", {});
+  check(
+    `${origin} POST /api/github/apps/state answers a state`,
+    state.status === 201 && /^[0-9a-f]{32}$/.test(state.body.state ?? ""),
+    `${state.status} ${JSON.stringify(state.body)}`,
+  );
+
+  const unknown = await api(
+    origin,
+    "GET",
+    `/api/github/apps/callback?code=smoke&state=${randomBytes(16).toString("hex")}`,
+  );
+  check(
+    `${origin} GET /api/github/apps/callback with an unknown state answers 400 InvalidState`,
+    unknown.status === 400 && unknown.body.reason === "InvalidState",
+    `${unknown.status} ${JSON.stringify(unknown.body)}`,
+  );
+  return Array.isArray(apps.body) ? apps.body : [];
+};
+
 const githubState = async (origin) => {
+  const apps = await smokeGitHubApps(origin);
   const installations = await api(origin, "GET", "/api/github/installations");
   check(
-    `${origin} GET /api/github/installations answers 503 SecretMissing or the list`,
-    (installations.status === 503 &&
-      installations.body.reason === "SecretMissing" &&
-      installations.body.message.includes("GITHUB_APP_")) ||
-      (installations.status === 200 && Array.isArray(installations.body)),
+    `${origin} GET /api/github/installations lists installations across GitHub Apps`,
+    installations.status === 200 &&
+      Array.isArray(installations.body) &&
+      installations.body.every(
+        (each) =>
+          typeof each.githubAppId === "string" &&
+          typeof each.installationId === "number" &&
+          typeof each.appSlug === "string",
+      ),
     `${installations.status} ${JSON.stringify(installations.body)}`,
   );
-  if (installations.status !== 200 || !Array.isArray(installations.body)) return undefined;
+  if (apps.length === 0 || !Array.isArray(installations.body)) return undefined;
   const owner = SMOKE_REPO.split("/")[0];
   const installation = installations.body.find((each) => each.account === owner);
   check(
-    `${origin} the GitHub App is installed on ${owner}`,
+    `${origin} a stored GitHub App is installed on ${owner}`,
     installation !== undefined,
     JSON.stringify(installations.body),
   );
-  return installation?.installationId;
+  return installation;
 };
 
 const smokeApi = async (origin) => {
-  const installationId = await githubState(origin);
-  const appInput = { ...SMOKE_APP, installationId: installationId ?? 0 };
+  const installation = await githubState(origin);
+  const installationId = installation?.installationId;
+  const appInput = {
+    ...SMOKE_APP,
+    githubAppId: installation?.githubAppId ?? "",
+    installationId: installationId ?? 0,
+  };
   const app = await findOrCreateApp(origin, appInput);
   const listed = await api(origin, "GET", "/api/apps");
   check(
@@ -182,6 +223,8 @@ const smokeApi = async (origin) => {
     ["PUT", "/api/apps/0000000000000000000000000", SMOKE_APP],
     ["POST", "/api/apps/0000000000000000000000000/clients", { name: SMOKE_CLIENT }],
     ["POST", "/api/clients/0000000000000000000000000/revoke", {}],
+    ["DELETE", `/api/github/apps/${UNKNOWN_ID}`, undefined],
+    ["POST", "/api/apps", { ...SMOKE_APP, githubAppId: UNKNOWN_ID }],
   ]) {
     const missing = await api(origin, method, path, body);
     check(
@@ -284,12 +327,12 @@ const checkFailurePath = (origin, row) => {
   const failure = row?.lastFailure;
   const wait = Date.parse(row?.nextAttemptAt ?? "") - Date.parse(failure?.failedAt ?? "");
   check(
-    `${origin} delivery without the GitHub secrets records SecretMissing and backs off a minute`,
+    `${origin} delivery without a GitHub App records NoGitHubApp and backs off a minute`,
     row?.status === "Pending" &&
       row.attempts === 1 &&
       row.issueUrl === null &&
       failure?.step === "GitHub" &&
-      failure.message === "SecretMissing GITHUB_APP_ID" &&
+      failure.message.startsWith("NoGitHubApp ") &&
       wait > 55000 &&
       wait < 65000,
     JSON.stringify(row),
@@ -620,7 +663,9 @@ const smokeUploads = async (origin, appId, signer, github) => {
   );
 
   if (!github) {
-    console.log("skip the Filed to Pending upload check: the GitHub App secrets are not set");
+    console.log(
+      "skip the Filed to Pending upload check: no stored GitHub App is installed on the smoke repository owner",
+    );
     return;
   }
   await smokeRefiled(origin, appId, signer, png);
@@ -769,7 +814,7 @@ const smokeSlack = async (origin, appId, otherAppId, signer, github) => {
   const missing = [
     workspace === undefined && "no Slack workspace exists",
     SLACK_CHANNEL === "" && "BUGSTACK_SMOKE_SLACK_CHANNEL is not set",
-    !github && "the GitHub App secrets are not set",
+    !github && "no stored GitHub App is installed on the smoke repository owner",
   ].filter(Boolean);
   if (missing.length > 0) {
     console.log(`skip the Slack happy path: ${missing.join(", ")}`);
@@ -797,8 +842,9 @@ const smokePages = async (origin) => {
   await visit(
     "the app form with the GitHub notice or picker",
     "/apps/new",
-    /GitHub App secrets are missing|GitHub installation/,
+    /No GitHub App yet|GitHub installation/,
   );
+  await visit("the GitHub Apps page", "/github", "Create GitHub App");
   await visit("the Slack workspaces page", "/slack", "Add a workspace");
   await visit(
     "the app page with its Slack section",
