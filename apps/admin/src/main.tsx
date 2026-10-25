@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/preact-que
 import { render } from "preact";
 import { Link, Route, Switch } from "wouter-preact";
 import { getMe, isUnauthorized } from "./api";
+import { AppList, AppPage, EditApp, NewApp } from "./apps";
 import { Failure, SignedOut } from "./notices";
 import "./style.css";
 
@@ -12,13 +13,6 @@ const queryClient = new QueryClient({
     },
   },
 });
-
-const Home = () => (
-  <section>
-    <h2>Home</h2>
-    <p>Apps, clients and reports arrive here.</p>
-  </section>
-);
 
 const NotFound = () => (
   <section>
@@ -51,7 +45,10 @@ const Shell = () => {
           <Failure what="Loading the signed-in identity" error={me.error} />
         ) : (
           <Switch>
-            <Route path="/" component={Home} />
+            <Route path="/" component={AppList} />
+            <Route path="/apps/new" component={NewApp} />
+            <Route path="/apps/:appId/edit" component={EditApp} />
+            <Route path="/apps/:appId" component={AppPage} />
             <Route component={NotFound} />
           </Switch>
         )}
