@@ -23,7 +23,13 @@ bugstack takes signed bug reports from app backends and files each as a GitHub i
 | `npm run access:env`                 | Write the service token to `~/.config/bugstack/access-env` (mode 600)                                     |
 | `npm run access:lookup`              | Print the PIN provider id and team domain                                                                 |
 | `npm run secret -- <NAME>`           | Pipe stdin to `wrangler secret put`                                                                       |
-| `npm run smoke [-- <sha>]`           | Check `/v1/health` and Access on both hosts                                                               |
+| `npm run smoke [-- <sha>]`           | Check `/v1/health`, Access, `/api/me`, the 415 rule and the admin shell on both hosts                     |
+
+## Admin API
+
+Every `/api/*` request verifies the Access JWT (`Cf-Access-Jwt-Assertion`, else the `CF_Authorization` cookie) in `crates/server/src/auth.rs`, then admits only `ADMIN_EMAIL` or the service token whose `common_name` is `ADMIN_CLIENT_ID`; anything else is 401 `Unauthorized`. POST and PUT, and DELETE with a body, need `content-type: application/json`, else 415; an empty body reads as `{}`. Empty `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` disable the check for `wrangler dev`. Version preview URLs (`<version>-bugstack.matthijs-f49.workers.dev`) sit outside Access, so the Worker check is their only gate; smoke sends a forged JWT there.
+
+The admin app keeps its response types by hand in `apps/admin/src/api.ts`. A 401 renders the signed-out notice; any other failure renders a notice with a prefilled issue link.
 
 ## Infra
 
