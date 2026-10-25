@@ -31,13 +31,17 @@ bugstack takes signed bug reports from app backends and files each as a GitHub i
 
 Every `/api/*` request verifies the Access JWT (`Cf-Access-Jwt-Assertion`, else the `CF_Authorization` cookie) in `crates/server/src/auth.rs`, then admits only `ADMIN_EMAIL` or the service token whose `common_name` is `ADMIN_CLIENT_ID`; anything else is 401 `Unauthorized`. POST and PUT, and DELETE with a body, need `content-type: application/json`, else 415; an empty body reads as `{}`. Empty `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` disable the check for `wrangler dev`. `preview_urls` is off in `wrangler.jsonc`: version preview hostnames sit outside Access, and smoke checks they no longer reach the Worker.
 
-Routes live in `crates/server/src/routes.rs`, D1 queries in `store.rs`, GitHub App calls in `github.rs`:
+Routes live in `crates/server/src/routes.rs`, D1 queries in `store.rs`, GitHub App calls in `github.rs`, Slack calls in `slack.rs`:
 
 - `GET /api/github/installations`, `GET /api/github/installations/{id}/repos`
 - `GET`/`POST /api/apps`, `GET`/`PUT /api/apps/{appId}`
 - `POST /api/apps/{appId}/clients` returns the secret once; `POST /api/clients/{clientId}/revoke`
 - `GET /api/apps/{appId}/reports` returns the newest 100 reports
 - `POST /api/reports/{reportId}/retry` resets a `Failed` report and delivers it; any other status is 409 `NotFailed`
+- `GET`/`POST /api/slack/workspaces`: create takes `{name, botToken}`, runs Slack `auth.test` and answers 400 with its error on refusal; `DELETE /api/slack/workspaces/{workspaceId}` is 204, or 409 `InUse` while an app posts to it
+- `PUT /api/apps/{appId}/slack` `{workspaceId, channel}` and `DELETE /api/apps/{appId}/slack`, both 204; an unknown workspace is 404
+
+The API never returns a bot token.
 
 Bad input is 400 `Invalid`, an unknown id 404 `NotFound`. A missing GitHub secret is 503 `SecretMissing`; set both from the GitHub App settings with `echo <app id> | npm run secret -- GITHUB_APP_ID` and `openssl pkcs8 -topk8 -nocrypt -in <key>.pem | npm run secret -- GITHUB_APP_PRIVATE_KEY`. `migrations/0001_init.sql` holds the whole schema. Smoke reuses the app `bugstack-smoke` and its client `agent`; seed only through the API.
 
@@ -51,7 +55,11 @@ The admin app keeps its response types by hand in `apps/admin/src/api.ts`. A 401
 
 ## Delivery
 
-`deliver.rs` claims a due `Pending` row (attempts plus one, a 5 minute lease), mints an installation token, opens the issue with `POST /repos/{repo}/issues`, records `github_issue` and sets `Filed`. Slack slots in between the issue and `Filed`. A GitHub non-2xx, network error or missing secret writes a `failure` row (`"{status} {first 500 chars}"`, `SecretMissing {name}`) and moves `next_attempt_at` by 1, 5, 30, 120, 720 minutes; the sixth failed attempt sets `Failed`. A D1 error propagates and the lease expiry hands the row to cron. The cron trigger (`* * * * *`) delivers up to 10 due rows, oldest first. Retry sets `Pending`, attempts 0 and runs `deliver` in the background. Smoke checks the `SecretMissing` path until the GitHub secrets are set, then files and closes a real issue with `gh`.
+`deliver.rs` claims a due `Pending` row (attempts plus one, a 5 minute lease), mints an installation token, opens the issue with `POST /repos/{repo}/issues`, records `github_issue`, then, when the app has a `slack_channel` row and no `slack_post`, sends `chat.postMessage` `{app}: <{issue url}|{title}>` (`&<>` escaped) with the workspace token, records `slack_post` and sets `Filed`. Slack `ok: false` or a non-2xx is a `Slack` failure with the same backoff; the next attempt reuses the filed issue. A GitHub non-2xx, network error or missing secret writes a `failure` row (`"{status} {first 500 chars}"`, `SecretMissing {name}`) and moves `next_attempt_at` by 1, 5, 30, 120, 720 minutes; the sixth failed attempt sets `Failed`. A D1 error propagates and the lease expiry hands the row to cron. The cron trigger (`* * * * *`) delivers up to 10 due rows, oldest first. Retry sets `Pending`, attempts 0 and runs `deliver` in the background. Smoke checks the `SecretMissing` path until the GitHub secrets are set, then files and closes a real issue with `gh`.
+
+## Slack
+
+Create a Slack app with the bot scope `chat:write` and install it in the workspace. Paste its `xoxb-` token on the admin Slack page, then `/invite @bugstack` in each channel an app posts to; a channel without the bot records `not_in_channel`. Smoke runs the Slack happy path only when a workspace exists, the GitHub secrets are set and `BUGSTACK_SMOKE_SLACK_CHANNEL` names a channel with the bot; `BUGSTACK_SMOKE_SLACK_OUTSIDE` (default `general`) names one without it.
 
 ## Infra
 

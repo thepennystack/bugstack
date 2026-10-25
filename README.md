@@ -28,6 +28,24 @@ Live at https://bugstack.kattebak.fyi.
 | `npm run secret -- <NAME>`                         | Set a Worker secret from stdin             |
 | `npm run smoke`                                    | Check the live Worker on both hosts        |
 
+## Send a report
+
+POST a JSON object with a `title` to `/v1/apps/{appId}/reports` with three headers:
+
+- `X-Bugstack-Client`: the client id
+- `X-Bugstack-Timestamp`: Unix seconds, within 300 s of now
+- `X-Bugstack-Signature`: lower-case hex `HMAC-SHA256(secret, "{timestamp}.{raw body}")`
+
+`npm run report` signs and sends one.
+
+## Setup
+
+Three one-time steps:
+
+1. Connect Workers Builds: under the Worker's Settings, Builds, set root `/`, build `npm run build && npm run build:worker` and deploy `npm run deploy`, turn non-production builds off, and give the build token D1 Edit.
+2. Create the GitHub App with Issues read and write, Metadata read and the webhook off, and install it on the accounts. Pipe the app id to `npm run secret -- GITHUB_APP_ID` and the PKCS#8 private key to `npm run secret -- GITHUB_APP_PRIVATE_KEY`.
+3. Create the Slack app with the bot scope `chat:write` and install it. Paste its `xoxb-` token on the admin Slack page and `/invite @bugstack` in each channel.
+
 ## Health
 
 `GET /v1/health` answers `{"commit": "<sha>"}` with the `x-bugstack-commit` header.
