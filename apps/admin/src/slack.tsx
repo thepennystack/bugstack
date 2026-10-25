@@ -6,8 +6,8 @@ import {
   deleteWorkspace,
   listWorkspaces,
   removeAppSlack,
-  SLACK_INSTALL_URL,
   setAppSlack,
+  slackInstallUrl,
   type Workspace,
 } from "./api";
 import { Failure } from "./notices";
@@ -26,7 +26,7 @@ const InstallCard = () => (
       <code class="mono">/invite @bugstack</code> in each channel an app posts to.
     </p>
     <footer class="card-actions">
-      <a class="button" href={SLACK_INSTALL_URL}>
+      <a class="button" href={slackInstallUrl()}>
         Add to Slack
       </a>
     </footer>

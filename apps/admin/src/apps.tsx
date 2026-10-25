@@ -257,7 +257,7 @@ const AppForm = ({ app }: { app?: App }) => {
             {save.isPending ? "Saving…" : "Save app"}
           </button>
           <Link
-            href={app === undefined ? "/" : `/apps/${app.appId}`}
+            href={app === undefined ? "/apps" : `/apps/${app.appId}`}
             class="button secondary outline"
           >
             Cancel
@@ -723,7 +723,7 @@ const DangerZone = ({ app }: { app: App }) => {
   const remove = useMutation({
     mutationFn: () => deleteApp(app.appId),
     onSuccess: () => {
-      navigate("/");
+      navigate("/apps");
       queryClient.removeQueries({ queryKey: appKey(app.appId) });
       queryClient.invalidateQueries({ queryKey: ["apps"] });
     },
@@ -798,7 +798,7 @@ export const AppPage = () => {
       <nav aria-label="breadcrumb">
         <ul>
           <li>
-            <Link href="/">Apps</Link>
+            <Link href="/apps">Apps</Link>
           </li>
           <li>{app.name}</li>
         </ul>

@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/preact-query";
-import { render } from "preact";
-import { Link, Route, Switch, useLocation } from "wouter-preact";
-import { getHealth, getMe, isUnauthorized } from "./api";
+import { type ComponentChildren, render } from "preact";
+import { Link, Redirect, Route, Router, Switch, useLocation } from "wouter-preact";
+import { getHealth, getMe, isUnauthorized, type Me, type OrgMembership, selectOrg } from "./api";
 import { AppList, AppPage, EditApp, NewApp } from "./apps";
 import { GitHubInstallations } from "./github";
 import { Failure, ISSUES, SignedOut } from "./notices";
@@ -22,39 +22,39 @@ const NotFound = () => (
   <>
     <PageHeader title="Not found" description="No page lives at this address." />
     <p>
-      <Link href="/">Back to the apps</Link>
+      <Link href="/apps">Back to the apps</Link>
     </p>
   </>
 );
 
 const NAV = [
-  { href: "/", label: "Apps", active: (path: string) => path === "/" || path.startsWith("/apps") },
+  { href: "/apps", label: "Apps", active: (path: string) => path.startsWith("/apps") },
   { href: "/github", label: "GitHub", active: (path: string) => path.startsWith("/github") },
   { href: "/slack", label: "Slack", active: (path: string) => path.startsWith("/slack") },
 ];
 
-const Identity = ({ email, pending }: { email: string | undefined; pending: boolean }) => {
-  if (email === undefined) {
+const Identity = ({ identity, pending }: { identity: string | undefined; pending: boolean }) => {
+  if (identity === undefined) {
     return <span class="identity muted">{pending ? "Signing in…" : "Not signed in"}</span>;
   }
   return (
-    <span class="identity" title={email}>
+    <span class="identity" title={identity}>
       <span class="avatar" aria-hidden="true">
-        {email.slice(0, 1).toUpperCase()}
+        {identity.slice(0, 1).toUpperCase()}
       </span>
-      <span class="identity-email">{email}</span>
+      <span class="identity-email">{identity}</span>
     </span>
   );
 };
 
-const TopNav = ({ email, pending }: { email: string | undefined; pending: boolean }) => {
+const TopNav = ({ identity, pending }: { identity: string | undefined; pending: boolean }) => {
   const [path] = useLocation();
   return (
     <header class="topbar">
       <nav class="container">
         <ul>
           <li>
-            <Link href="/" class="brand">
+            <Link href="/apps" class="brand">
               <BrandMark />
               <span>bugstack</span>
             </Link>
@@ -71,7 +71,7 @@ const TopNav = ({ email, pending }: { email: string | undefined; pending: boolea
         </ul>
         <ul>
           <li>
-            <Identity email={email} pending={pending} />
+            <Identity identity={identity} pending={pending} />
           </li>
         </ul>
       </nav>
@@ -108,39 +108,95 @@ const Footer = () => (
   </footer>
 );
 
+const NoOrganisation = () => (
+  <article class="callout callout-warning" role="status">
+    <header>
+      <h2>No organisation yet</h2>
+    </header>
+    <p>
+      You are signed in, but no bugstack organisation has added you. Ask an Owner to add your email
+      address.
+    </p>
+  </article>
+);
+
+const OrgRoutes = () => {
+  const [path] = useLocation();
+  if (path.startsWith("~") || path === "/") return <Redirect to="/apps" replace />;
+  return (
+    <Switch>
+      <Route path="/apps" component={AppList} />
+      <Route path="/github" component={GitHubInstallations} />
+      <Route path="/slack" component={Workspaces} />
+      <Route path="/apps/new" component={NewApp} />
+      <Route path="/apps/:appId/edit" component={EditApp} />
+      <Route path="/apps/:appId" component={AppPage} />
+      <Route component={NotFound} />
+    </Switch>
+  );
+};
+
+const Frame = ({
+  me,
+  pending,
+  children,
+}: {
+  me: Me | undefined;
+  pending: boolean;
+  children: ComponentChildren;
+}) => (
+  <>
+    <TopNav identity={me?.identity} pending={pending} />
+    <main class="container">{children}</main>
+    <Footer />
+  </>
+);
+
+const ORG_PATH = /^\/orgs\/([^/]+)/;
+
+const pickOrg = (orgs: OrgMembership[]): OrgMembership | undefined => {
+  const named = window.location.pathname.match(ORG_PATH)?.[1];
+  const wanted = named === undefined ? undefined : decodeURIComponent(named);
+  return orgs.find((org) => org.orgId === wanted) ?? orgs[0];
+};
+
 const Shell = () => {
   const me = useQuery({ queryKey: ["me"], queryFn: getMe });
   if (me.isError && isUnauthorized(me.error)) {
     return (
-      <>
-        <TopNav email={undefined} pending={false} />
-        <main class="container">
-          <SignedOut />
-        </main>
-        <Footer />
-      </>
+      <Frame me={undefined} pending={false}>
+        <SignedOut />
+      </Frame>
     );
   }
+  if (me.isError) {
+    return (
+      <Frame me={undefined} pending={false}>
+        <Failure what="Loading the signed-in identity" error={me.error} />
+      </Frame>
+    );
+  }
+  if (me.isPending)
+    return (
+      <Frame me={undefined} pending={true}>
+        {null}
+      </Frame>
+    );
+  const org = pickOrg(me.data.orgs);
+  if (org === undefined) {
+    return (
+      <Frame me={me.data} pending={false}>
+        <NoOrganisation />
+      </Frame>
+    );
+  }
+  selectOrg(org.orgId);
   return (
-    <>
-      <TopNav email={me.data?.email} pending={me.isPending} />
-      <main class="container">
-        {me.isError ? (
-          <Failure what="Loading the signed-in identity" error={me.error} />
-        ) : (
-          <Switch>
-            <Route path="/" component={AppList} />
-            <Route path="/github" component={GitHubInstallations} />
-            <Route path="/slack" component={Workspaces} />
-            <Route path="/apps/new" component={NewApp} />
-            <Route path="/apps/:appId/edit" component={EditApp} />
-            <Route path="/apps/:appId" component={AppPage} />
-            <Route component={NotFound} />
-          </Switch>
-        )}
-      </main>
-      <Footer />
-    </>
+    <Router base={`/orgs/${encodeURIComponent(org.orgId)}`}>
+      <Frame me={me.data} pending={false}>
+        <OrgRoutes />
+      </Frame>
+    </Router>
   );
 };
 

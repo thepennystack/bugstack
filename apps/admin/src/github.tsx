@@ -1,14 +1,15 @@
-import { useQuery } from "@tanstack/preact-query";
+import { useMutation, useQuery } from "@tanstack/preact-query";
 import { Link } from "wouter-preact";
-import { getGitHubApp, listInstallations } from "./api";
+import { listInstallations, startGitHubInstall } from "./api";
 import { Failure, isNotBootstrapped } from "./notices";
 import { ExternalIcon, Loading, PageHeader } from "./ui";
 
 export const INSTALLATIONS = ["github", "installations"];
-const GITHUB_APP = ["github", "app"];
-
 const InstallCard = () => {
-  const app = useQuery({ queryKey: GITHUB_APP, queryFn: getGitHubApp, retry: false });
+  const install = useMutation({
+    mutationFn: startGitHubInstall,
+    onSuccess: ({ url }) => window.location.assign(url),
+  });
   return (
     <article class="card">
       <header>
@@ -18,16 +19,19 @@ const InstallCard = () => {
         Install the bugstack GitHub App on each account whose repositories receive issues, and grant
         it those repositories. Then pick the installation on each app.
       </p>
-      {app.isPending && <Loading what="the GitHub App" />}
-      {app.isError && <Failure what="Loading the GitHub App" error={app.error} />}
-      {app.isSuccess && (
-        <footer class="card-actions">
-          <a class="button with-icon" href={app.data.installUrl} target="_blank" rel="noreferrer">
-            Install {app.data.slug}
-            <ExternalIcon />
-          </a>
-        </footer>
-      )}
+      {install.isError && <Failure what="Starting the GitHub install" error={install.error} />}
+      <footer class="card-actions">
+        <button
+          type="button"
+          class="with-icon"
+          aria-busy={install.isPending || install.isSuccess}
+          disabled={install.isPending || install.isSuccess}
+          onClick={() => install.mutate()}
+        >
+          Install on GitHub
+          <ExternalIcon />
+        </button>
+      </footer>
     </article>
   );
 };

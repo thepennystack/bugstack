@@ -3,8 +3,17 @@ export type ErrorBody = {
   message: string;
 };
 
+export type Role = "Owner" | "Member";
+
+export type OrgMembership = {
+  orgId: string;
+  name: string;
+  role: Role;
+};
+
 export type Me = {
-  email: string;
+  identity: string;
+  orgs: OrgMembership[];
 };
 
 export type ClientStatus = "Active" | "Revoked";
@@ -95,9 +104,8 @@ export type Installation = {
   account: string;
 };
 
-export type GitHubAppInfo = {
-  slug: string;
-  installUrl: string;
+export type InstallUrl = {
+  url: string;
 };
 
 export class ApiError extends Error {
@@ -122,7 +130,17 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isErrorBody: Guard<ErrorBody> = (value): value is ErrorBody =>
   isRecord(value) && typeof value.reason === "string" && typeof value.message === "string";
 
-const isMe: Guard<Me> = (value): value is Me => isRecord(value) && typeof value.email === "string";
+const isOrgMembership: Guard<OrgMembership> = (value): value is OrgMembership =>
+  isRecord(value) &&
+  typeof value.orgId === "string" &&
+  typeof value.name === "string" &&
+  (value.role === "Owner" || value.role === "Member");
+
+const isMe: Guard<Me> = (value): value is Me =>
+  isRecord(value) &&
+  typeof value.identity === "string" &&
+  Array.isArray(value.orgs) &&
+  value.orgs.every(isOrgMembership);
 
 const isSlack: Guard<Slack> = (value): value is Slack =>
   isRecord(value) && typeof value.workspaceId === "string" && typeof value.channel === "string";
@@ -188,8 +206,8 @@ const isReportRow: Guard<ReportRow> = (value): value is ReportRow =>
 const isInstallation: Guard<Installation> = (value): value is Installation =>
   isRecord(value) && typeof value.installationId === "number" && typeof value.account === "string";
 
-const isGitHubAppInfo: Guard<GitHubAppInfo> = (value): value is GitHubAppInfo =>
-  isRecord(value) && typeof value.slug === "string" && typeof value.installUrl === "string";
+const isInstallUrl: Guard<InstallUrl> = (value): value is InstallUrl =>
+  isRecord(value) && typeof value.url === "string";
 
 const isWorkspace: Guard<Workspace> = (value): value is Workspace =>
   isRecord(value) &&
@@ -260,56 +278,76 @@ const request = async <T>(
 
 export const getHealth = (): Promise<Health> => request("GET", "/v1/health", isHealth);
 
-export const getMe = (): Promise<Me> => request("GET", "/api/me", isMe);
+let me: Promise<Me> | undefined;
+let orgBase: string | undefined;
 
-export const listApps = (): Promise<App[]> => request("GET", "/api/apps", listOf(isApp));
+export const getMe = (): Promise<Me> => {
+  me ??= request("GET", "/api/me", isMe).catch((error: unknown) => {
+    me = undefined;
+    throw error;
+  });
+  return me;
+};
+
+export const selectOrg = (orgId: string): void => {
+  orgBase = `/api/orgs/${encodeURIComponent(orgId)}`;
+};
+
+const scopedPath = (path: string): string => {
+  if (orgBase === undefined) throw new Error("no organisation is selected yet");
+  return `${orgBase}${path}`;
+};
+
+const scoped = <T>(method: string, path: string, guard: Guard<T>, body?: unknown): Promise<T> =>
+  request(method, scopedPath(path), guard, body);
+
+export const listApps = (): Promise<App[]> => scoped("GET", "/apps", listOf(isApp));
 
 export const getApp = (appId: string): Promise<AppDetail> =>
-  request("GET", `/api/apps/${encodeURIComponent(appId)}`, isAppDetail);
+  scoped("GET", `/apps/${encodeURIComponent(appId)}`, isAppDetail);
 
-export const createApp = (input: AppInput): Promise<App> =>
-  request("POST", "/api/apps", isApp, input);
+export const createApp = (input: AppInput): Promise<App> => scoped("POST", "/apps", isApp, input);
 
 export const updateApp = (appId: string, input: AppInput): Promise<App> =>
-  request("PUT", `/api/apps/${encodeURIComponent(appId)}`, isApp, input);
+  scoped("PUT", `/apps/${encodeURIComponent(appId)}`, isApp, input);
 
 export const createClient = (appId: string, name: string): Promise<CreatedClient> =>
-  request("POST", `/api/apps/${encodeURIComponent(appId)}/clients`, isCreatedClient, { name });
+  scoped("POST", `/apps/${encodeURIComponent(appId)}/clients`, isCreatedClient, { name });
 
 export const revokeClient = (clientId: string): Promise<Client> =>
-  request("POST", `/api/clients/${encodeURIComponent(clientId)}/revoke`, isClient, {});
+  scoped("POST", `/clients/${encodeURIComponent(clientId)}/revoke`, isClient, {});
 
 export const deleteApp = (appId: string): Promise<undefined> =>
-  request("DELETE", `/api/apps/${encodeURIComponent(appId)}`, isEmpty);
+  scoped("DELETE", `/apps/${encodeURIComponent(appId)}`, isEmpty);
 
 export const deleteClient = (clientId: string): Promise<undefined> =>
-  request("DELETE", `/api/clients/${encodeURIComponent(clientId)}`, isEmpty);
+  scoped("DELETE", `/clients/${encodeURIComponent(clientId)}`, isEmpty);
 
 export const listReports = (appId: string): Promise<ReportRow[]> =>
-  request("GET", `/api/apps/${encodeURIComponent(appId)}/reports`, listOf(isReportRow));
+  scoped("GET", `/apps/${encodeURIComponent(appId)}/reports`, listOf(isReportRow));
 
 export const retryReport = (reportId: string): Promise<ReportRow> =>
-  request("POST", `/api/reports/${encodeURIComponent(reportId)}/retry`, isReportRow, {});
+  scoped("POST", `/reports/${encodeURIComponent(reportId)}/retry`, isReportRow, {});
 
 export const listInstallations = (): Promise<Installation[]> =>
-  request("GET", "/api/github/installations", listOf(isInstallation));
+  scoped("GET", "/github/installations", listOf(isInstallation));
 
 export const listRepos = (installationId: number): Promise<string[]> =>
-  request("GET", `/api/github/installations/${installationId}/repos`, listOf(isString));
+  scoped("GET", `/github/installations/${installationId}/repos`, listOf(isString));
 
-export const getGitHubApp = (): Promise<GitHubAppInfo> =>
-  request("GET", "/api/github/app", isGitHubAppInfo);
+export const startGitHubInstall = (): Promise<InstallUrl> =>
+  scoped("POST", "/github/install", isInstallUrl, {});
 
 export const listWorkspaces = (): Promise<Workspace[]> =>
-  request("GET", "/api/slack/workspaces", listOf(isWorkspace));
+  scoped("GET", "/slack/workspaces", listOf(isWorkspace));
 
-export const SLACK_INSTALL_URL = "/api/slack/install";
+export const slackInstallUrl = (): string => scopedPath("/slack/install");
 
 export const deleteWorkspace = (workspaceId: string): Promise<undefined> =>
-  request("DELETE", `/api/slack/workspaces/${encodeURIComponent(workspaceId)}`, isEmpty);
+  scoped("DELETE", `/slack/workspaces/${encodeURIComponent(workspaceId)}`, isEmpty);
 
 export const setAppSlack = (appId: string, slack: Slack): Promise<undefined> =>
-  request("PUT", `/api/apps/${encodeURIComponent(appId)}/slack`, isEmpty, slack);
+  scoped("PUT", `/apps/${encodeURIComponent(appId)}/slack`, isEmpty, slack);
 
 export const removeAppSlack = (appId: string): Promise<undefined> =>
-  request("DELETE", `/api/apps/${encodeURIComponent(appId)}/slack`, isEmpty);
+  scoped("DELETE", `/apps/${encodeURIComponent(appId)}/slack`, isEmpty);
