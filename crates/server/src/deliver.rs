@@ -2,6 +2,7 @@ use serde_json::{Map, Value};
 use worker::*;
 
 use crate::github;
+use crate::slack;
 use crate::store::{self, Delivery};
 
 const LEASE_MINUTES: u32 = 5;
@@ -94,6 +95,35 @@ async fn file_issue(
     }
 }
 
+pub fn slack_text(report: &Delivery, issue_url: &str) -> String {
+    format!(
+        "{}: <{}|{}>",
+        slack::escape(&report.app_name),
+        slack::escape(issue_url),
+        slack::escape(&report.title)
+    )
+}
+
+async fn post_slack(
+    db: &D1Database,
+    report_id: &str,
+    report: &Delivery,
+    issue_url: &str,
+) -> Result<std::result::Result<(), String>> {
+    let (Some(channel), Some(token)) = (&report.slack_channel, &report.slack_token) else {
+        return Ok(Ok(()));
+    };
+    if report.slack_posted != 0 {
+        return Ok(Ok(()));
+    }
+    let posted = slack::post_message(token, channel, &slack_text(report, issue_url)).await?;
+    if let Err(error) = posted {
+        return Ok(Err(error.failure()));
+    }
+    store::insert_slack_post(db, report_id).await?;
+    Ok(Ok(()))
+}
+
 pub async fn deliver(env: &Env, report_id: &str) -> Result<()> {
     let db = env.d1("DB")?;
     let lease = store::minutes_from_now(LEASE_MINUTES);
@@ -101,8 +131,12 @@ pub async fn deliver(env: &Env, report_id: &str) -> Result<()> {
         return Ok(());
     };
     let report = store::delivery(&db, report_id).await?;
-    if let Err(message) = file_issue(env, report_id, &report).await? {
-        return fail(&db, report_id, attempts, "GitHub", &message).await;
+    let issue_url = match file_issue(env, report_id, &report).await? {
+        Ok(url) => url,
+        Err(message) => return fail(&db, report_id, attempts, "GitHub", &message).await,
+    };
+    if let Err(message) = post_slack(&db, report_id, &report, &issue_url).await? {
+        return fail(&db, report_id, attempts, "Slack", &message).await;
     }
     store::set_status(&db, report_id, "Filed").await
 }

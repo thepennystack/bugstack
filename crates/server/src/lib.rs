@@ -6,6 +6,7 @@ pub mod ingest;
 pub mod random;
 pub mod routes;
 pub mod sign;
+pub mod slack;
 pub mod store;
 
 use serde_json::json;

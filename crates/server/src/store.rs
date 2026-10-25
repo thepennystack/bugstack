@@ -378,17 +378,26 @@ pub struct Delivery {
     pub github_installation_id: u64,
     pub github_repo: String,
     pub issue_url: Option<String>,
+    pub app_name: String,
+    pub slack_channel: Option<String>,
+    pub slack_token: Option<String>,
+    pub slack_posted: u8,
 }
 
 pub async fn delivery(db: &D1Database, report_id: &str) -> Result<Delivery> {
     let row: Option<Delivery> = db
         .prepare(
             "SELECT r.title, r.payload, r.received_at, c.name AS client_name, \
-             a.github_installation_id, a.github_repo, g.url AS issue_url \
+             a.github_installation_id, a.github_repo, g.url AS issue_url, \
+             a.name AS app_name, s.channel AS slack_channel, w.bot_token AS slack_token, \
+             (p.report_id IS NOT NULL) AS slack_posted \
              FROM report r \
              JOIN client c ON c.client_id = r.client_id \
              JOIN app a ON a.app_id = r.app_id \
              LEFT JOIN github_issue g ON g.report_id = r.report_id \
+             LEFT JOIN slack_channel s ON s.app_id = r.app_id \
+             LEFT JOIN slack_workspace w ON w.workspace_id = s.workspace_id \
+             LEFT JOIN slack_post p ON p.report_id = r.report_id \
              WHERE r.report_id = ?1",
         )
         .bind(&[text(report_id)])?
@@ -469,4 +478,120 @@ pub async fn reset_failed(db: &D1Database, report_id: &str) -> Result<bool> {
         .first(None)
         .await?;
     Ok(reset.is_some())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Workspace {
+    #[serde(alias = "workspace_id")]
+    pub workspace_id: String,
+    pub name: String,
+    #[serde(alias = "created_at")]
+    pub created_at: String,
+}
+
+const WORKSPACE_SELECT: &str = "SELECT workspace_id, name, created_at FROM slack_workspace";
+
+pub async fn list_workspaces(db: &D1Database) -> Result<Vec<Workspace>> {
+    db.prepare(format!(
+        "{WORKSPACE_SELECT} ORDER BY created_at, workspace_id"
+    ))
+    .all()
+    .await?
+    .results()
+}
+
+pub async fn get_workspace(db: &D1Database, workspace_id: &str) -> Result<Option<Workspace>> {
+    db.prepare(format!("{WORKSPACE_SELECT} WHERE workspace_id = ?1"))
+        .bind(&[text(workspace_id)])?
+        .first(None)
+        .await
+}
+
+pub async fn create_workspace(db: &D1Database, name: &str, bot_token: &str) -> Result<Workspace> {
+    let workspace_id = random::id()?;
+    db.prepare(
+        "INSERT INTO slack_workspace (workspace_id, name, bot_token, created_at) \
+         VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(&[
+        text(&workspace_id),
+        text(name),
+        text(bot_token),
+        text(&now()),
+    ])?
+    .run()
+    .await?;
+    get_workspace(db, &workspace_id).await?.ok_or_else(|| {
+        worker::Error::RustError(format!("workspace {workspace_id} vanished after insert"))
+    })
+}
+
+pub enum Removal {
+    Removed,
+    Missing,
+    InUse(u32),
+}
+
+#[derive(Deserialize)]
+struct Count {
+    count: u32,
+}
+
+pub async fn delete_workspace(db: &D1Database, workspace_id: &str) -> Result<Removal> {
+    if get_workspace(db, workspace_id).await?.is_none() {
+        return Ok(Removal::Missing);
+    }
+    let used: Option<Count> = db
+        .prepare("SELECT COUNT(*) AS count FROM slack_channel WHERE workspace_id = ?1")
+        .bind(&[text(workspace_id)])?
+        .first(None)
+        .await?;
+    let count = used.map_or(0, |used| used.count);
+    if count > 0 {
+        return Ok(Removal::InUse(count));
+    }
+    db.prepare("DELETE FROM slack_workspace WHERE workspace_id = ?1")
+        .bind(&[text(workspace_id)])?
+        .run()
+        .await?;
+    Ok(Removal::Removed)
+}
+
+pub async fn set_app_slack(
+    db: &D1Database,
+    app_id: &str,
+    workspace_id: &str,
+    channel: &str,
+) -> Result<()> {
+    db.prepare(
+        "INSERT INTO slack_channel (app_id, workspace_id, channel, created_at) \
+         VALUES (?1, ?2, ?3, ?4) ON CONFLICT (app_id) DO UPDATE SET \
+         workspace_id = excluded.workspace_id, channel = excluded.channel",
+    )
+    .bind(&[
+        text(app_id),
+        text(workspace_id),
+        text(channel),
+        text(&now()),
+    ])?
+    .run()
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_app_slack(db: &D1Database, app_id: &str) -> Result<()> {
+    db.prepare("DELETE FROM slack_channel WHERE app_id = ?1")
+        .bind(&[text(app_id)])?
+        .run()
+        .await?;
+    Ok(())
+}
+
+pub async fn insert_slack_post(db: &D1Database, report_id: &str) -> Result<()> {
+    db.prepare("INSERT INTO slack_post (report_id, posted_at) VALUES (?1, ?2)")
+        .bind(&[text(report_id), text(&now())])?
+        .run()
+        .await?;
+    Ok(())
 }
