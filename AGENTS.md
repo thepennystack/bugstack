@@ -12,21 +12,27 @@ bugstack takes signed bug reports from app backends and files each as a GitHub i
 
 ## Scripts
 
-| Script                               | Does                                                                                                      |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `npm run fix`                        | Biome and `cargo fmt` rewrite files                                                                       |
-| `npm run lint` / `lint:rust`         | Biome check / `cargo fmt --check` and `clippy -D warnings`                                                |
-| `npm run typecheck`                  | `tsc` over `apps/*`                                                                                       |
-| `npm run build` / `build:worker`     | Vite build of `apps/admin` / wasm bundle in `crates/server/build`                                         |
-| `npm run deploy`                     | Apply D1 migrations, then `wrangler deploy` with the vars from `infra/access.json`                        |
-| `npm run infra:plan` / `infra:apply` | OpenTofu in `infra/`, state at `~/.config/bugstack/terraform.tfstate`; apply rewrites `infra/access.json` |
-| `npm run access:env`                 | Write the service token to `~/.config/bugstack/access-env` (mode 600)                                     |
-| `npm run access:lookup`              | Print the PIN provider id and team domain                                                                 |
-| `npm run secret -- <NAME>`           | Pipe stdin to `wrangler secret put`                                                                       |
-| `npm run upload-secret`              | Rotate `UPLOAD_SIGNING_SECRET`, keeping a copy in `~/.config/bugstack/upload-secret` (mode 600) for smoke |
-| `npm run smoke [-- <sha>]`           | Check health, Access, the admin API and report ingest, then render the pages in headless Chromium         |
-| `npm run report -- …`                | Sign and POST one report (see Report ingest)                                                              |
-| `npm run test:rust`                  | `cargo test`: the HMAC check in `sign.rs`                                                                 |
+| Script                               | Does                                                                                                                  |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `npm run fix`                        | Biome and `cargo fmt` rewrite files                                                                                   |
+| `npm run lint` / `lint:rust`         | Biome check / `cargo fmt --check` and `clippy -D warnings`                                                            |
+| `npm run typecheck`                  | `tsc` over `apps/*`                                                                                                   |
+| `npm run build` / `build:worker`     | Vite build of `apps/admin` / wasm bundle in `crates/server/build`                                                     |
+| `npm run deploy`                     | Refuses locally; Workers Builds runs it: D1 migrations, then `wrangler deploy` with the vars from `infra/access.json` |
+| `npm run infra:plan` / `infra:apply` | OpenTofu in `infra/`, state at `~/.config/bugstack/terraform.tfstate`; apply rewrites `infra/access.json`             |
+| `npm run access:env`                 | Write the service token to `~/.config/bugstack/access-env` (mode 600)                                                 |
+| `npm run access:lookup`              | Print the PIN provider id and team domain                                                                             |
+| `npm run secret -- <NAME>`           | Pipe stdin to `wrangler secret put`                                                                                   |
+| `npm run upload-secret`              | Rotate `UPLOAD_SIGNING_SECRET`, keeping a copy in `~/.config/bugstack/upload-secret` (mode 600) for smoke             |
+| `npm run smoke [-- <sha>]`           | Check health, Access, the admin API and report ingest, then render the pages in headless Chromium                     |
+| `npm run report -- …`                | Sign and POST one report (see Report ingest)                                                                          |
+| `npm run test:rust`                  | `cargo test`: the HMAC check in `sign.rs`                                                                             |
+
+## Deploy
+
+Workers Builds is connected to the repo and deploys every push to `main`. `npm run deploy` refuses unless `WORKERS_CI` is set. GitHub holds no Cloudflare token.
+
+First-time connect on a fresh account: under the Worker's Settings, Builds, set root `/`, build `npm run build && npm run build:worker` and deploy `npm run deploy`, turn non-production builds off, and give the build token D1 Edit.
 
 ## Admin API
 

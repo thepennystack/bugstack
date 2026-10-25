@@ -42,7 +42,7 @@ To attach screenshots, declare them in the report as `images: [{contentType, siz
 
 ## Setup
 
-Three one-time steps:
+Workers Builds is connected to the repo and deploys `main`. GitHub holds no Cloudflare token. On a fresh account, three one-time steps:
 
 1. Connect Workers Builds: under the Worker's Settings, Builds, set root `/`, build `npm run build && npm run build:worker` and deploy `npm run deploy`, turn non-production builds off, and give the build token D1 Edit.
 2. Open the admin GitHub page and click Create GitHub App, approve the app on GitHub, then Install it on the accounts. On each app, pick the installation and repository.

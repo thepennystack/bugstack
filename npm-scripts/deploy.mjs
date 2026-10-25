@@ -2,12 +2,16 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cloudflareEnv } from "./env.mjs";
 
 const ADMIN_EMAIL = "matthijs@ischen.nl";
 
+if (!process.env.WORKERS_CI) {
+  console.error("Deploys run from Workers Builds on push to main.");
+  process.exit(1);
+}
+
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const env = process.env.WORKERS_CI ? process.env : cloudflareEnv();
+const env = process.env;
 const vars = JSON.parse(readFileSync(join(root, "infra", "access.json"), "utf8"));
 const value = (name) => {
   if (!vars[name]) {
