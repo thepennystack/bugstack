@@ -789,6 +789,121 @@ code.secret {
   overflow-wrap: anywhere;
 }
 
+.page-header > button {
+  margin: 0;
+  width: auto;
+}
+
+.empty > button {
+  margin: 0.5rem 0 0;
+  width: auto;
+}
+
+.installs-title {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 0.75rem 0 0.4rem;
+}
+
+.installs {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+}
+
+.installs li {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  padding-block: 0.4rem;
+  margin: 0;
+  border-bottom: 1px dashed var(--hairline);
+}
+
+.installs li:last-child {
+  border-bottom: 0;
+}
+
+.installs li > button {
+  margin: 0;
+}
+
+.installs-name {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.installs-name .muted {
+  font-size: 0.8rem;
+}
+
+.installs-empty {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0 0 0.5rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px dashed var(--hairline);
+  border-radius: var(--pico-border-radius);
+}
+
+.card-actions > button,
+.card-actions > a.button {
+  margin: 0;
+  min-height: 44px;
+}
+
+.confirm {
+  flex: 1 1 100%;
+}
+
+.confirm p {
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.confirm .actions > button {
+  margin: 0;
+}
+
+.installs .confirm {
+  margin-top: 0.25rem;
+}
+
+dialog.step > article {
+  width: min(100%, 36rem);
+}
+
+dialog.step > article > header h2 {
+  font-size: 1.15rem;
+  margin-bottom: 0.25rem;
+}
+
+dialog.step > article > header p {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+dialog.step form {
+  margin-bottom: 0;
+}
+
+dialog.step form > footer.actions {
+  margin-top: 0.5rem;
+}
+
+dialog.step form > footer.actions > button {
+  margin: 0;
+  width: auto;
+}
+
 @media (max-width: 640px) {
   .topbar nav {
     flex-wrap: nowrap;
@@ -825,6 +940,8 @@ code.secret {
   }
 
   .page-header > a.button,
+  .page-header > button,
+  .empty > button,
   .section-header > button {
     width: 100%;
     justify-content: center;
@@ -856,9 +973,14 @@ code.secret {
 
   .actions > button,
   .actions > a.button,
-  form > button[type="submit"] {
+  form > button[type="submit"],
+  dialog.step form > footer.actions > button {
     flex: 1 1 100%;
     width: 100%;
+  }
+
+  dialog.step > article {
+    padding-inline: 1rem;
   }
 
   .card-actions > * {

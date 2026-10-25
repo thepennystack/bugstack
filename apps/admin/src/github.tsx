@@ -1,19 +1,22 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/preact-query";
+import { useMutation, useQuery } from "@tanstack/preact-query";
 import { useState } from "preact/hooks";
 import { Link, useSearch } from "wouter-preact";
-import { createManifestState, deleteGitHubApp, type GitHubApp, listGitHubApps } from "./api";
+import {
+  createManifestState,
+  deleteGitHubApp,
+  type GitHubApp,
+  listGitHubApps,
+  listInstallations,
+} from "./api";
 import { Failure } from "./notices";
-import { ExternalIcon, Loading, PageHeader, When } from "./ui";
+import { ConfirmDelete, Step } from "./step";
+import { ExternalIcon, Loading, PageHeader, PlusIcon, When } from "./ui";
 
 export const GITHUB_APPS = ["github", "apps"];
+const INSTALLATIONS = ["installations"];
 
 const OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const NAME_MAX = 34;
-
-const randomSuffix = (): string => {
-  const bytes = crypto.getRandomValues(new Uint8Array(3));
-  return `-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-};
 
 const manifestFor = (name: string) => {
   const origin = window.location.origin;
@@ -49,91 +52,117 @@ const postToGitHub = (action: string, manifest: object) => {
   form.submit();
 };
 
-const CreateGitHubApp = () => {
-  const [org, setOrg] = useState("");
-  const [suffix, setSuffix] = useState(randomSuffix);
-  const name = `bugstack${suffix.trim()}`;
+const defaultName = (owner: string): string =>
+  (owner === "" ? "bugstack" : `bugstack-${owner}`).slice(0, NAME_MAX);
+
+const CreateGitHubApp = ({ onClose }: { onClose: () => void }) => {
+  const [owner, setOwner] = useState("");
+  const [name, setName] = useState<string | null>(null);
+  const appName = name ?? defaultName(owner.trim());
   const create = useMutation({
     mutationFn: async () => {
-      const owner = org.trim();
-      if (owner !== "" && !OWNER.test(owner)) {
-        throw new Error(`${owner} is not a GitHub organization login`);
+      const login = owner.trim();
+      const chosen = appName.trim();
+      if (login !== "" && !OWNER.test(login)) {
+        throw new Error(`${login} is not a GitHub organization login`);
       }
-      if (name.length > NAME_MAX) {
-        throw new Error(`${name} is longer than GitHub's ${NAME_MAX} characters`);
+      if (chosen === "") throw new Error("The app needs a name");
+      if (chosen.length > NAME_MAX) {
+        throw new Error(`${chosen} is longer than GitHub's ${NAME_MAX} characters`);
       }
       const { state } = await createManifestState();
-      postToGitHub(newAppUrl(owner, state), manifestFor(name));
+      postToGitHub(newAppUrl(login, state), manifestFor(chosen));
     },
   });
   return (
-    <article class="form-card">
-      <header>
-        <h3>Create GitHub App</h3>
-        <p class="muted">
-          GitHub opens its app form already filled in, you confirm, and it sends you back here with
-          the app's credentials.
-        </p>
-      </header>
+    <Step
+      title="Create a GitHub App"
+      description="GitHub opens its app form already filled in, you confirm, and it sends you back here."
+      onClose={onClose}
+    >
       <form
         onSubmit={(event) => {
           event.preventDefault();
           create.mutate();
         }}
       >
-        <div class="grid">
-          <label>
-            GitHub organization
-            <input
-              name="org"
-              placeholder="personal account"
-              value={org}
-              onInput={(event) => setOrg(event.currentTarget.value)}
-            />
-            <small>Leave empty to create the app on your personal account.</small>
-          </label>
-          <label>
-            Name suffix
-            <input
-              name="suffix"
-              class="mono"
-              maxLength={NAME_MAX - "bugstack".length}
-              value={suffix}
-              onInput={(event) => setSuffix(event.currentTarget.value)}
-            />
-            <small>
-              The app will be called <code class="mono">{name}</code>.
-            </small>
-          </label>
-        </div>
+        <label>
+          Owner
+          <input
+            name="owner"
+            autoComplete="off"
+            placeholder="your personal account"
+            value={owner}
+            onInput={(event) => setOwner(event.currentTarget.value)}
+          />
+          <small>
+            A GitHub organization, or empty for your personal account. GitHub App names are unique
+            across all of GitHub, so pick an owner and a name once; one app serves every org you
+            install it on.
+          </small>
+        </label>
+        <label>
+          Name
+          <input
+            name="name"
+            class="mono"
+            autoComplete="off"
+            required
+            maxLength={NAME_MAX}
+            value={appName}
+            onInput={(event) => setName(event.currentTarget.value)}
+          />
+        </label>
         {create.isError && <Failure what="Creating the GitHub App" error={create.error} />}
-        <button type="submit" aria-busy={create.isPending} disabled={create.isPending}>
-          {create.isPending ? "Opening GitHub…" : "Create GitHub App"}
-        </button>
+        <footer class="actions">
+          <button type="submit" aria-busy={create.isPending} disabled={create.isPending}>
+            {create.isPending ? "Opening GitHub…" : "Continue on GitHub"}
+          </button>
+          <button type="button" class="secondary outline" onClick={onClose}>
+            Cancel
+          </button>
+        </footer>
       </form>
-    </article>
+    </Step>
   );
 };
 
-const DeleteGitHubApp = ({ app }: { app: GitHubApp }) => {
-  const queryClient = useQueryClient();
-  const remove = useMutation({
-    mutationFn: () => deleteGitHubApp(app.githubAppId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: GITHUB_APPS }),
-  });
+const CreateButton = ({ first }: { first: boolean }) => {
+  const [open, setOpen] = useState(false);
   return (
     <>
       <button
         type="button"
-        class="secondary outline small"
-        aria-busy={remove.isPending}
-        disabled={remove.isPending}
-        onClick={() => remove.mutate()}
+        class={first ? "with-icon" : "secondary with-icon"}
+        onClick={() => setOpen(true)}
       >
-        {remove.isPending ? "Deleting…" : "Delete"}
+        <PlusIcon />
+        {first ? "Create GitHub App" : "Create another GitHub App"}
       </button>
-      {remove.isError && <Failure what={`Deleting ${app.name}`} error={remove.error} />}
+      {open && <CreateGitHubApp onClose={() => setOpen(false)} />}
     </>
+  );
+};
+
+const Installations = ({ app }: { app: GitHubApp }) => {
+  const installations = useQuery({ queryKey: INSTALLATIONS, queryFn: listInstallations });
+  if (installations.isPending) return <Loading what="installations" />;
+  if (installations.isError) {
+    return <Failure what="Loading the installations" error={installations.error} />;
+  }
+  const mine = installations.data.filter(
+    (installation) => installation.githubAppId === app.githubAppId,
+  );
+  if (mine.length === 0) return <p class="installs-empty">Not installed anywhere yet</p>;
+  return (
+    <ul class="installs">
+      {mine.map((installation) => (
+        <li key={installation.installationId}>
+          <span class="mono">{installation.account}</span>
+          <span class="muted">#{installation.installationId}</span>
+        </li>
+      ))}
+    </ul>
   );
 };
 
@@ -153,19 +182,22 @@ const GitHubAppCard = ({ app }: { app: GitHubApp }) => (
         <span class="mono">{app.ownerLogin}</span>
       </li>
       <li>
-        <span class="meta-label">Slug</span>
-        <span class="mono">{app.slug}</span>
-      </li>
-      <li>
         <span class="meta-label">Created</span>
         <When iso={app.createdAt} />
       </li>
     </ul>
+    <h4 class="installs-title">Installed on</h4>
+    <Installations app={app} />
     <footer class="card-actions">
-      <a class="button small" href={installUrl(app.slug)} target="_blank" rel="noreferrer">
-        Install
+      <a class="button with-icon" href={installUrl(app.slug)} target="_blank" rel="noreferrer">
+        Install on another account
+        <ExternalIcon />
       </a>
-      <DeleteGitHubApp app={app} />
+      <ConfirmDelete
+        name={app.name}
+        queryKey={GITHUB_APPS}
+        remove={() => deleteGitHubApp(app.githubAppId)}
+      />
     </footer>
   </article>
 );
@@ -175,12 +207,10 @@ const Steps = () => (
     <h3>No GitHub App yet</h3>
     <p>bugstack files issues through a GitHub App you own. Two steps:</p>
     <ol>
-      <li>Create the app with the form below; GitHub asks you to confirm.</li>
-      <li>
-        Install it on each account whose repositories should receive issues, then pick the
-        installation on an app.
-      </li>
+      <li>Create the app; GitHub asks you to confirm.</li>
+      <li>Install it on each account whose repositories should receive issues.</li>
     </ol>
+    <CreateButton first />
   </article>
 );
 
@@ -192,6 +222,7 @@ export const GitHubApps = () => {
       <PageHeader
         title="GitHub Apps"
         description="The GitHub Apps bugstack files issues through, and where they are installed."
+        action={apps.isSuccess && apps.data.length > 0 && <CreateButton first={false} />}
       />
       {created !== null && (
         <article class="callout callout-success" role="status">
@@ -219,7 +250,6 @@ export const GitHubApps = () => {
           ))}
         </div>
       )}
-      <CreateGitHubApp />
     </>
   );
 };

@@ -89,6 +89,7 @@ export type Workspace = {
   workspaceId: string;
   teamId: string;
   teamName: string;
+  slackAppId: string;
   slackAppName: string;
   createdAt: string;
 };
@@ -241,6 +242,7 @@ const isWorkspace: Guard<Workspace> = (value): value is Workspace =>
   typeof value.workspaceId === "string" &&
   typeof value.teamId === "string" &&
   typeof value.teamName === "string" &&
+  typeof value.slackAppId === "string" &&
   typeof value.slackAppName === "string" &&
   typeof value.createdAt === "string" &&
   !("botToken" in value);
