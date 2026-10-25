@@ -1015,8 +1015,8 @@ const smokePages = async (origin) => {
     "/apps/new",
     /No GitHub App yet|GitHub installation/,
   );
-  await visit("the GitHub Apps page", "/github", "Create GitHub App");
-  await visit("the Slack page", "/slack", "Create a Slack app");
+  await visit("the GitHub Apps page", "/github", /Create (another )?GitHub App/);
+  await visit("the Slack page", "/slack", /Create (a|another) Slack app/);
   await visit(
     "the app page with its Slack section",
     `/apps/${smoked.appId}`,

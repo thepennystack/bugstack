@@ -15,7 +15,8 @@ import {
   type Workspace,
 } from "./api";
 import { Failure } from "./notices";
-import { ExternalIcon, Loading, PageHeader, When } from "./ui";
+import { ConfirmDelete, Step } from "./step";
+import { ExternalIcon, Loading, PageHeader, PlusIcon, When } from "./ui";
 
 const WORKSPACES = ["slack", "workspaces"];
 const SLACK_APPS = ["slack", "apps"];
@@ -32,45 +33,40 @@ const manifestFor = (origin: string) => ({
 const createSlackAppUrl = (): string =>
   `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(JSON.stringify(manifestFor(window.location.origin)))}`;
 
-const CreateSlackApp = () => {
+const CreateSlackApp = ({ onClose }: { onClose: () => void }) => {
   const queryClient = useQueryClient();
   const [name, setName] = useState("bugstack");
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
-  const [signingSecret, setSigningSecret] = useState("");
   const create = useMutation({
     mutationFn: () =>
       createSlackApp({
         name: name.trim(),
         clientId: clientId.trim(),
         clientSecret: clientSecret.trim(),
-        signingSecret: signingSecret.trim(),
+        signingSecret: "",
       }),
     onSuccess: () => {
-      setClientId("");
-      setClientSecret("");
-      setSigningSecret("");
-      queryClient.invalidateQueries({ queryKey: SLACK_APPS });
+      onClose();
+      return queryClient.invalidateQueries({ queryKey: SLACK_APPS });
     },
   });
   return (
-    <article class="form-card">
-      <header>
-        <h3>Create a Slack app</h3>
-        <p class="muted">
-          Slack does not hand the app back like GitHub does, so paste its client id and secret once.
-        </p>
-      </header>
+    <Step
+      title="Create a Slack app"
+      description="Slack hands you these two strings once; paste them here."
+      onClose={onClose}
+    >
       <ol class="how-to">
         <li>
-          <a href={createSlackAppUrl()} target="_blank" rel="noreferrer" class="button with-icon">
-            Create a Slack app
+          <a href={createSlackAppUrl()} target="_blank" rel="noreferrer" class="with-icon">
+            Open Slack's app dialog
             <ExternalIcon />
-          </a>
+          </a>{" "}
+          with the manifest filled in, and create the app.
         </li>
         <li>
-          Copy the client id and client secret from its <em>Basic Information</em> page into this
-          form.
+          Copy the client id and client secret from its <em>Basic Information</em> page.
         </li>
       </ol>
       <form
@@ -79,95 +75,101 @@ const CreateSlackApp = () => {
           create.mutate();
         }}
       >
-        <div class="grid">
-          <label>
-            Name
-            <input
-              name="slackAppName"
-              required
-              maxLength={80}
-              value={name}
-              onInput={(event) => setName(event.currentTarget.value)}
-            />
-          </label>
-          <label>
-            Client id
-            <input
-              name="clientId"
-              class="mono"
-              autoComplete="off"
-              required
-              maxLength={255}
-              placeholder="1234567890.1234567890"
-              value={clientId}
-              onInput={(event) => setClientId(event.currentTarget.value)}
-            />
-          </label>
-          <label>
-            Client secret
-            <input
-              name="clientSecret"
-              type="password"
-              class="mono"
-              autoComplete="off"
-              required
-              maxLength={255}
-              value={clientSecret}
-              onInput={(event) => setClientSecret(event.currentTarget.value)}
-            />
-          </label>
-          <label>
-            Signing secret
-            <input
-              name="signingSecret"
-              type="password"
-              class="mono"
-              autoComplete="off"
-              maxLength={255}
-              placeholder="optional"
-              value={signingSecret}
-              onInput={(event) => setSigningSecret(event.currentTarget.value)}
-            />
-          </label>
-        </div>
+        <label>
+          Name
+          <input
+            name="slackAppName"
+            autoComplete="off"
+            required
+            maxLength={80}
+            value={name}
+            onInput={(event) => setName(event.currentTarget.value)}
+          />
+        </label>
+        <label>
+          Client id
+          <input
+            name="clientId"
+            class="mono"
+            autoComplete="off"
+            required
+            maxLength={255}
+            placeholder="1234567890.1234567890"
+            value={clientId}
+            onInput={(event) => setClientId(event.currentTarget.value)}
+          />
+        </label>
+        <label>
+          Client secret
+          <input
+            name="clientSecret"
+            type="password"
+            class="mono"
+            autoComplete="off"
+            required
+            maxLength={255}
+            value={clientSecret}
+            onInput={(event) => setClientSecret(event.currentTarget.value)}
+          />
+        </label>
         {create.isError && <Failure what="Storing the Slack app" error={create.error} />}
-        <button type="submit" aria-busy={create.isPending} disabled={create.isPending}>
-          {create.isPending ? "Storing…" : "Store Slack app"}
-        </button>
+        <footer class="actions">
+          <button type="submit" aria-busy={create.isPending} disabled={create.isPending}>
+            {create.isPending ? "Storing…" : "Store Slack app"}
+          </button>
+          <button type="button" class="secondary outline" onClick={onClose}>
+            Cancel
+          </button>
+        </footer>
       </form>
-    </article>
+    </Step>
   );
 };
 
-const DeleteButton = ({
-  label,
-  what,
-  queryKey,
-  remove: removeFn,
-}: {
-  label: string;
-  what: string;
-  queryKey: string[];
-  remove: () => Promise<undefined>;
-}) => {
-  const queryClient = useQueryClient();
-  const remove = useMutation({
-    mutationFn: removeFn,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey }),
-  });
+const CreateButton = ({ first }: { first: boolean }) => {
+  const [open, setOpen] = useState(false);
   return (
     <>
       <button
         type="button"
-        class="secondary outline small"
-        aria-busy={remove.isPending}
-        disabled={remove.isPending}
-        onClick={() => remove.mutate()}
+        class={first ? "with-icon" : "secondary with-icon"}
+        onClick={() => setOpen(true)}
       >
-        {remove.isPending ? "Deleting…" : label}
+        <PlusIcon />
+        {first ? "Create a Slack app" : "Create another Slack app"}
       </button>
-      {remove.isError && <Failure what={what} error={remove.error} />}
+      {open && <CreateSlackApp onClose={() => setOpen(false)} />}
     </>
+  );
+};
+
+const AppWorkspaces = ({ app }: { app: SlackApp }) => {
+  const workspaces = useQuery({ queryKey: WORKSPACES, queryFn: listWorkspaces });
+  if (workspaces.isPending) return <Loading what="workspaces" />;
+  if (workspaces.isError) {
+    return <Failure what="Loading the Slack workspaces" error={workspaces.error} />;
+  }
+  const mine = workspaces.data.filter((workspace) => workspace.slackAppId === app.slackAppId);
+  if (mine.length === 0) return <p class="installs-empty">Not in any workspace yet</p>;
+  return (
+    <ul class="installs">
+      {mine.map((workspace) => (
+        <li key={workspace.workspaceId}>
+          <span class="installs-name">
+            <strong>{workspace.teamName}</strong>
+            <span class="muted">
+              Installed <When iso={workspace.createdAt} />
+            </span>
+          </span>
+          <ConfirmDelete
+            label="Remove"
+            name={workspace.teamName}
+            queryKey={WORKSPACES}
+            remove={() => deleteWorkspace(workspace.workspaceId)}
+          />
+        </li>
+      ))}
+    </ul>
   );
 };
 
@@ -182,17 +184,18 @@ const SlackAppCard = ({ app }: { app: SlackApp }) => (
         <span class="mono">{app.clientId}</span>
       </li>
       <li>
-        <span class="meta-label">Stored</span>
+        <span class="meta-label">Created</span>
         <When iso={app.createdAt} />
       </li>
     </ul>
+    <h4 class="installs-title">Workspaces</h4>
+    <AppWorkspaces app={app} />
     <footer class="card-actions">
-      <a class="button small" href={slackInstallUrl(app.slackAppId)}>
-        Add to Slack
+      <a class="button" href={slackInstallUrl(app.slackAppId)}>
+        Add to another workspace
       </a>
-      <DeleteButton
-        label="Delete"
-        what={`Deleting ${app.name}`}
+      <ConfirmDelete
+        name={app.name}
         queryKey={SLACK_APPS}
         remove={() => deleteSlackApp(app.slackAppId)}
       />
@@ -200,85 +203,27 @@ const SlackAppCard = ({ app }: { app: SlackApp }) => (
   </article>
 );
 
-const SlackApps = () => {
-  const apps = useQuery({ queryKey: SLACK_APPS, queryFn: listSlackApps });
-  return (
-    <section>
-      <h2>Add to Slack</h2>
-      {apps.isPending && <Loading what="Slack apps" />}
-      {apps.isError && <Failure what="Loading the Slack apps" error={apps.error} />}
-      {apps.isSuccess && apps.data.length === 0 && (
-        <p class="empty-line">No Slack app stored yet. Create one above.</p>
-      )}
-      {apps.isSuccess && apps.data.length > 0 && (
-        <div class="card-grid">
-          {apps.data.map((app) => (
-            <SlackAppCard key={app.slackAppId} app={app} />
-          ))}
-        </div>
-      )}
-    </section>
-  );
-};
-
-const WorkspaceCard = ({ workspace }: { workspace: Workspace }) => (
-  <article class="card">
-    <header>
-      <h3>{workspace.teamName}</h3>
-    </header>
-    <ul class="meta">
-      <li>
-        <span class="meta-label">Slack app</span>
-        <span>{workspace.slackAppName}</span>
-      </li>
-      <li>
-        <span class="meta-label">Installed</span>
-        <When iso={workspace.createdAt} />
-      </li>
-    </ul>
-    <footer class="card-actions">
-      <DeleteButton
-        label="Delete"
-        what={`Deleting ${workspace.teamName}`}
-        queryKey={WORKSPACES}
-        remove={() => deleteWorkspace(workspace.workspaceId)}
-      />
-    </footer>
+const Empty = () => (
+  <article class="empty">
+    <h3>No Slack app yet</h3>
+    <p>bugstack posts a link to each new issue through a Slack app you own. Two steps:</p>
+    <ol>
+      <li>Create the app in Slack and paste its client id and secret here.</li>
+      <li>Add it to each workspace, then pick a channel on an app.</li>
+    </ol>
+    <CreateButton first />
   </article>
 );
 
-const WorkspaceList = () => {
-  const workspaces = useQuery({ queryKey: WORKSPACES, queryFn: listWorkspaces });
-  return (
-    <section>
-      <h2>Workspaces</h2>
-      {workspaces.isPending && <Loading what="Slack workspaces" />}
-      {workspaces.isError && (
-        <Failure what="Loading the Slack workspaces" error={workspaces.error} />
-      )}
-      {workspaces.isSuccess && workspaces.data.length === 0 && (
-        <p class="empty-line">
-          No Slack workspaces yet. Press Add to Slack, then pick a channel on an app.
-        </p>
-      )}
-      {workspaces.isSuccess && workspaces.data.length > 0 && (
-        <div class="card-grid">
-          {workspaces.data.map((workspace) => (
-            <WorkspaceCard key={workspace.workspaceId} workspace={workspace} />
-          ))}
-        </div>
-      )}
-    </section>
-  );
-};
-
 export const Workspaces = () => {
+  const apps = useQuery({ queryKey: SLACK_APPS, queryFn: listSlackApps });
   const installed = new URLSearchParams(useSearch()).get("installed");
   return (
     <>
       <PageHeader
         title="Slack"
-        description="Workspaces whose channels can get a link to each new issue."
+        description="The Slack apps that post a link to each new issue, and the workspaces they are in."
+        action={apps.isSuccess && apps.data.length > 0 && <CreateButton first={false} />}
       />
       {installed !== null && (
         <article class="callout callout-success" role="status">
@@ -291,9 +236,16 @@ export const Workspaces = () => {
           </p>
         </article>
       )}
-      <CreateSlackApp />
-      <SlackApps />
-      <WorkspaceList />
+      {apps.isPending && <Loading what="Slack apps" />}
+      {apps.isError && <Failure what="Loading the Slack apps" error={apps.error} />}
+      {apps.isSuccess && apps.data.length === 0 && <Empty />}
+      {apps.isSuccess && apps.data.length > 0 && (
+        <div class="card-grid">
+          {apps.data.map((app) => (
+            <SlackAppCard key={app.slackAppId} app={app} />
+          ))}
+        </div>
+      )}
     </>
   );
 };
