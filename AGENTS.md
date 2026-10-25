@@ -12,21 +12,26 @@ bugstack takes signed bug reports from app backends and files each as a GitHub i
 
 ## Scripts
 
-| Script                               | Does                                                                                                                  |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
-| `npm run fix`                        | Biome and `cargo fmt` rewrite files                                                                                   |
-| `npm run lint` / `lint:rust`         | Biome check / `cargo fmt --check` and `clippy -D warnings`                                                            |
-| `npm run typecheck`                  | `tsc` over `apps/*`                                                                                                   |
-| `npm run build` / `build:worker`     | Vite build of `apps/admin` / wasm bundle in `crates/server/build`                                                     |
-| `npm run deploy`                     | Refuses locally; Workers Builds runs it: D1 migrations, then `wrangler deploy` with the vars from `infra/access.json` |
-| `npm run infra:plan` / `infra:apply` | OpenTofu in `infra/`, state at `~/.config/bugstack/terraform.tfstate`; apply rewrites `infra/access.json`             |
-| `npm run access:env`                 | Write the service token to `~/.config/bugstack/access-env` (mode 600)                                                 |
-| `npm run access:lookup`              | Print the PIN provider id and team domain                                                                             |
-| `npm run secret -- <NAME>`           | Pipe stdin to `wrangler secret put`                                                                                   |
-| `npm run upload-secret`              | Rotate `UPLOAD_SIGNING_SECRET`, keeping a copy in `~/.config/bugstack/upload-secret` (mode 600) for smoke             |
-| `npm run smoke [-- <sha>]`           | Check health, Access, the admin API and report ingest, then render the pages in headless Chromium                     |
-| `npm run report -- …`                | Sign and POST one report (see Report ingest)                                                                          |
-| `npm run test:rust`                  | `cargo test`: the HMAC check in `sign.rs`                                                                             |
+| Script                                 | Does                                                                                                                      |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `npm run fix`                          | Biome and `cargo fmt` rewrite files                                                                                       |
+| `npm run lint` / `lint:rust`           | Biome check / `cargo fmt --check` and `clippy -D warnings`                                                                |
+| `npm run typecheck`                    | `tsc` over `apps/*`                                                                                                       |
+| `npm run build` / `build:worker`       | Vite build of `apps/admin` / wasm bundle in `crates/server/build`                                                         |
+| `npm run deploy`                       | Refuses locally; Workers Builds runs it: D1 migrations, then `wrangler deploy` with the vars from `infra/access.json`     |
+| `npm run infra:plan` / `infra:apply`   | OpenTofu in `infra/`, state at `~/.config/bugstack/terraform.tfstate`; apply rewrites `infra/access.json`                 |
+| `npm run access:env`                   | Write the service token to `~/.config/bugstack/access-env` (mode 600)                                                     |
+| `npm run access:lookup`                | Print the PIN provider id and team domain                                                                                 |
+| `npm run secret -- <NAME>`             | Pipe stdin to `wrangler secret put`                                                                                       |
+| `npm run bootstrap [-- --owner <org>]` | Once per instance: a page on port 8789 creates the GitHub App and Slack app and sets their Worker secrets (see Bootstrap) |
+| `npm run upload-secret`                | Rotate `UPLOAD_SIGNING_SECRET`, keeping a copy in `~/.config/bugstack/upload-secret` (mode 600) for smoke                 |
+| `npm run smoke [-- <sha>]`             | Check health, Access, the admin API and report ingest, then render the pages in headless Chromium                         |
+| `npm run report -- …`                  | Sign and POST one report (see Report ingest)                                                                              |
+| `npm run test:rust`                    | `cargo test`: the HMAC check in `sign.rs`                                                                                 |
+
+## Bootstrap
+
+`npm run bootstrap` serves on `0.0.0.0:8789` (`--port`, `--worker <origin>`, `--owner <org>`, `--name`). Page 1 runs the GitHub manifest flow for a public app with Issues write and Metadata read; page 2 links to Slack's create-from-manifest dialog and takes the client id and secret. It then pipes `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_PRIVATE_KEY`, `SLACK_CLIENT_ID` and `SLACK_CLIENT_SECRET` to `wrangler secret put` and exits. A rerun replaces them. Nothing is printed or written to disk.
 
 ## Deploy
 
