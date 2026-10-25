@@ -21,7 +21,6 @@ const manifestFor = (name: string) => {
     url: origin,
     redirect_url: `${origin}/api/github/apps/callback`,
     public: false,
-    hook_attributes: { active: false },
     default_permissions: { issues: "write", metadata: "read" },
     default_events: [],
   };
