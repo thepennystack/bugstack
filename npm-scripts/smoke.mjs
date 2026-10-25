@@ -1,6 +1,9 @@
 import { execFileSync } from "node:child_process";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { chromium } from "playwright-core";
-import { accessHeaders, cloudflareEnv } from "./env.mjs";
+import { accessHeaders, CONFIG_DIR, cloudflareEnv } from "./env.mjs";
+import { signedHeaders } from "./sign.mjs";
 
 const WORKERS_DEV = "bugstack.matthijs-f49.workers.dev";
 const ORIGINS = ["https://bugstack.kattebak.fyi", `https://${WORKERS_DEV}`];
@@ -11,6 +14,11 @@ const SMOKE_APP = {
   githubRepo: "thepennystack/bugstack",
 };
 const SMOKE_CLIENT = "agent";
+const SIGNER = "smoke-signer";
+const SIGNER_FILE = join(CONFIG_DIR, "smoke-client");
+const REVOKE_CLIENT = "smoke-revoke";
+const OTHER_APP = { ...SMOKE_APP, name: "bugstack-smoke-other" };
+const MAX_BODY = 60 * 1024;
 const commit =
   process.argv[2] ?? execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 const token = accessHeaders();
@@ -41,7 +49,7 @@ const api = async (origin, method, path, body) => {
   return { status: response.status, body: await json(response) };
 };
 
-const smokeApp = async (origin) => {
+const findOrCreateApp = async (origin, wanted) => {
   const list = await api(origin, "GET", "/api/apps");
   check(
     `${origin} GET /api/apps lists apps`,
@@ -49,22 +57,22 @@ const smokeApp = async (origin) => {
     `${list.status} ${JSON.stringify(list.body)}`,
   );
   const existing = Array.isArray(list.body)
-    ? list.body.find((app) => app.name === SMOKE_APP.name)
+    ? list.body.find((app) => app.name === wanted.name)
     : undefined;
   if (existing) return existing;
-  const created = await api(origin, "POST", "/api/apps", SMOKE_APP);
+  const created = await api(origin, "POST", "/api/apps", wanted);
   check(
-    `${origin} POST /api/apps creates ${SMOKE_APP.name}`,
+    `${origin} POST /api/apps creates ${wanted.name}`,
     created.status === 201 &&
       created.body.appId?.length === 25 &&
-      created.body.githubRepo === SMOKE_APP.githubRepo,
+      created.body.githubRepo === wanted.githubRepo,
     `${created.status} ${JSON.stringify(created.body)}`,
   );
   return created.body;
 };
 
 const smokeApi = async (origin) => {
-  const app = await smokeApp(origin);
+  const app = await findOrCreateApp(origin, SMOKE_APP);
   const listed = await api(origin, "GET", "/api/apps");
   check(
     `${origin} GET /api/apps returns ${app.appId}`,
@@ -109,19 +117,10 @@ const smokeApi = async (origin) => {
     agent = created.body;
   }
 
-  const throwaway = await api(origin, "POST", `/api/apps/${app.appId}/clients`, {
-    name: "smoke-revoke",
-  });
-  const revoked = await api(origin, "POST", `/api/clients/${throwaway.body.clientId}/revoke`, {});
-  check(
-    `${origin} POST /api/clients/{clientId}/revoke flips the status`,
-    throwaway.status === 201 &&
-      throwaway.body.status === "Active" &&
-      revoked.status === 200 &&
-      revoked.body.status === "Revoked" &&
-      !("secret" in revoked.body),
-    `${throwaway.status} ${revoked.status} ${JSON.stringify(revoked.body)}`,
-  );
+  const revokedClient = await smokeRevoked(origin, app.appId, clients);
+  const signer = await smokeSigner(origin, app.appId, clients);
+  const other = await findOrCreateApp(origin, OTHER_APP);
+  smoked.reportTitle = await smokeReports(origin, app.appId, other.appId, signer, revokedClient);
 
   const installations = await api(origin, "GET", "/api/github/installations");
   check(
@@ -166,6 +165,132 @@ const smokeApi = async (origin) => {
   console.log(`smoke app ${app.appId}, client ${SMOKE_CLIENT} ${agent.clientId}`);
 };
 
+const smokeRevoked = async (origin, appId, clients) => {
+  const existing = clients.find(
+    (client) => client.name === REVOKE_CLIENT && client.status === "Revoked",
+  );
+  if (existing) return existing.clientId;
+  const throwaway = await api(origin, "POST", `/api/apps/${appId}/clients`, {
+    name: REVOKE_CLIENT,
+  });
+  const revoked = await api(origin, "POST", `/api/clients/${throwaway.body.clientId}/revoke`, {});
+  check(
+    `${origin} POST /api/clients/{clientId}/revoke flips the status`,
+    throwaway.status === 201 &&
+      throwaway.body.status === "Active" &&
+      revoked.status === 200 &&
+      revoked.body.status === "Revoked" &&
+      !("secret" in revoked.body),
+    `${throwaway.status} ${revoked.status} ${JSON.stringify(revoked.body)}`,
+  );
+  return throwaway.body.clientId;
+};
+
+const readSigner = () => {
+  if (!existsSync(SIGNER_FILE)) return undefined;
+  return JSON.parse(readFileSync(SIGNER_FILE, "utf8"));
+};
+
+const smokeSigner = async (origin, appId, clients) => {
+  const saved = readSigner();
+  const active = clients.some(
+    (client) => client.clientId === saved?.clientId && client.status === "Active",
+  );
+  if (saved?.appId === appId && active) return saved;
+  const created = await api(origin, "POST", `/api/apps/${appId}/clients`, { name: SIGNER });
+  check(
+    `${origin} POST /api/apps/${appId}/clients creates ${SIGNER}`,
+    created.status === 201 && typeof created.body.secret === "string",
+    `${created.status} ${created.body.reason ?? ""}`,
+  );
+  const signer = { appId, clientId: created.body.clientId, secret: created.body.secret };
+  writeFileSync(SIGNER_FILE, JSON.stringify(signer), { mode: 0o600 });
+  chmodSync(SIGNER_FILE, 0o600);
+  return signer;
+};
+
+const postReport = async (origin, appId, body, headers) => {
+  const response = await fetch(`${origin}/v1/apps/${appId}/reports`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": "application/json", ...headers },
+    body,
+  });
+  return { status: response.status, body: await json(response) };
+};
+
+const smokeReports = async (origin, appId, otherAppId, signer, revokedClientId) => {
+  const title = `Smoke report ${commit.slice(0, 7)} ${new Date().toISOString()}`;
+  const body = JSON.stringify({ title, error: "Error: smoke\n    at smoke.mjs", extra: 1 });
+  const sign = (text, timestamp) => signedHeaders(signer.clientId, signer.secret, text, timestamp);
+
+  const accepted = await postReport(origin, appId, body, sign(body));
+  check(
+    `${origin} a signed report answers 202 with a reportId`,
+    accepted.status === 202 && accepted.body.reportId?.length === 25,
+    `${accepted.status} ${JSON.stringify(accepted.body)}`,
+  );
+  const reports = await api(origin, "GET", `/api/apps/${appId}/reports`);
+  const row = Array.isArray(reports.body)
+    ? reports.body.find((report) => report.reportId === accepted.body.reportId)
+    : undefined;
+  check(
+    `${origin} GET /api/apps/${appId}/reports lists the report as Pending`,
+    reports.status === 200 &&
+      reports.body.length <= 100 &&
+      row?.title === title &&
+      row.status === "Pending" &&
+      row.attempts === 0 &&
+      row.clientName === SIGNER &&
+      row.issueUrl === null &&
+      row.slackPosted === false &&
+      row.lastFailure === null,
+    `${reports.status} ${JSON.stringify(row ?? reports.body).slice(0, 300)}`,
+  );
+
+  const now = Math.floor(Date.now() / 1000);
+  const large = JSON.stringify({ title, body: "x".repeat(61 * 1024) });
+  for (const [label, target, text, headers, status, reason] of [
+    ["an unsigned request", appId, body, {}, 401, "MissingSignature"],
+    ["a 301 s old timestamp", appId, body, sign(body, now - 301), 401, "StaleTimestamp"],
+    [
+      "a bad signature",
+      appId,
+      body,
+      signedHeaders(signer.clientId, "not-the-secret", body),
+      401,
+      "BadSignature",
+    ],
+    [
+      "a revoked client",
+      appId,
+      body,
+      signedHeaders(revokedClientId, "not-the-secret", body),
+      401,
+      "UnknownClient",
+    ],
+    ["a client of another app", otherAppId, body, sign(body), 401, "UnknownClient"],
+    [`a ${large.length} byte body`, appId, large, sign(large), 413, "TooLarge"],
+    [
+      "a missing title",
+      appId,
+      JSON.stringify({ error: "no title" }),
+      sign(JSON.stringify({ error: "no title" })),
+      400,
+      "InvalidReport",
+    ],
+  ]) {
+    const refused = await postReport(origin, target, text, headers);
+    check(
+      `${origin} POST /v1/apps/{appId}/reports refuses ${label} with ${status} ${reason}`,
+      refused.status === status && refused.body.reason === reason,
+      `${refused.status} ${JSON.stringify(refused.body)}`,
+    );
+  }
+  check(`the large body exceeds ${MAX_BODY} bytes`, large.length > MAX_BODY, large.length);
+  return title;
+};
+
 const smokePages = async (origin) => {
   const browser = await chromium.launch();
   const context = await browser.newContext({ extraHTTPHeaders: token });
@@ -181,6 +306,7 @@ const smokePages = async (origin) => {
   };
   await visit("the app list", "/", SMOKE_APP.name);
   await visit("the app page with its clients", `/apps/${smoked.appId}`, smoked.clientId);
+  await visit("the app page with its reports", `/apps/${smoked.appId}`, smoked.reportTitle);
   await visit(
     "the app form with the GitHub notice or picker",
     "/apps/new",
