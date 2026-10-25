@@ -651,53 +651,6 @@ pub async fn reset_failed(db: &D1Database, report_id: &str) -> Result<bool> {
     Ok(reset.is_some())
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Workspace {
-    #[serde(alias = "workspace_id")]
-    pub workspace_id: String,
-    pub name: String,
-    #[serde(alias = "created_at")]
-    pub created_at: String,
-}
-
-const WORKSPACE_SELECT: &str = "SELECT workspace_id, name, created_at FROM slack_workspace";
-
-pub async fn list_workspaces(db: &D1Database) -> Result<Vec<Workspace>> {
-    db.prepare(format!(
-        "{WORKSPACE_SELECT} ORDER BY created_at, workspace_id"
-    ))
-    .all()
-    .await?
-    .results()
-}
-
-pub async fn get_workspace(db: &D1Database, workspace_id: &str) -> Result<Option<Workspace>> {
-    db.prepare(format!("{WORKSPACE_SELECT} WHERE workspace_id = ?1"))
-        .bind(&[text(workspace_id)])?
-        .first(None)
-        .await
-}
-
-pub async fn create_workspace(db: &D1Database, name: &str, bot_token: &str) -> Result<Workspace> {
-    let workspace_id = random::id()?;
-    db.prepare(
-        "INSERT INTO slack_workspace (workspace_id, name, bot_token, created_at) \
-         VALUES (?1, ?2, ?3, ?4)",
-    )
-    .bind(&[
-        text(&workspace_id),
-        text(name),
-        text(bot_token),
-        text(&now()),
-    ])?
-    .run()
-    .await?;
-    get_workspace(db, &workspace_id).await?.ok_or_else(|| {
-        worker::Error::RustError(format!("workspace {workspace_id} vanished after insert"))
-    })
-}
-
 pub enum Removal {
     Removed,
     Missing,
@@ -707,26 +660,6 @@ pub enum Removal {
 #[derive(Deserialize)]
 struct Count {
     count: u32,
-}
-
-pub async fn delete_workspace(db: &D1Database, workspace_id: &str) -> Result<Removal> {
-    if get_workspace(db, workspace_id).await?.is_none() {
-        return Ok(Removal::Missing);
-    }
-    let used: Option<Count> = db
-        .prepare("SELECT COUNT(*) AS count FROM slack_channel WHERE workspace_id = ?1")
-        .bind(&[text(workspace_id)])?
-        .first(None)
-        .await?;
-    let count = used.map_or(0, |used| used.count);
-    if count > 0 {
-        return Ok(Removal::InUse(count));
-    }
-    db.prepare("DELETE FROM slack_workspace WHERE workspace_id = ?1")
-        .bind(&[text(workspace_id)])?
-        .run()
-        .await?;
-    Ok(Removal::Removed)
 }
 
 pub async fn set_app_slack(

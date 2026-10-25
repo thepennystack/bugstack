@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use wasm_bindgen::JsValue;
 use worker::*;
 
@@ -32,7 +32,26 @@ struct Answer {
     error: Option<String>,
 }
 
-type Outcome = std::result::Result<(), SlackError>;
+#[derive(Deserialize)]
+pub struct Team {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+pub struct Installed {
+    pub access_token: String,
+    pub team: Team,
+}
+
+pub struct OAuthCode<'a> {
+    pub code: &'a str,
+    pub client_id: &'a str,
+    pub client_secret: &'a str,
+    pub redirect_uri: &'a str,
+}
+
+type Outcome<T> = std::result::Result<T, SlackError>;
 
 pub fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
@@ -40,14 +59,25 @@ pub fn escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
-async fn call(method: &str, token: &str, body: &Value) -> Result<Outcome> {
-    let headers = Headers::new();
-    headers.set("Authorization", &format!("Bearer {token}"))?;
-    headers.set("Content-Type", "application/json; charset=utf-8")?;
+fn form(pairs: &[(&str, &str)]) -> String {
+    pairs
+        .iter()
+        .map(|(key, value)| {
+            format!(
+                "{}={}",
+                js_sys::encode_uri_component(key),
+                js_sys::encode_uri_component(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+async fn call(method: &str, headers: Headers, body: String) -> Result<Outcome<String>> {
     let mut init = RequestInit::new();
     init.with_method(Method::Post)
         .with_headers(headers)
-        .with_body(Some(JsValue::from_str(&body.to_string())));
+        .with_body(Some(JsValue::from_str(&body)));
     let request = Request::new_with_init(&format!("{API}/{method}"), &init)?;
     let mut response = match Fetch::Request(request).send().await {
         Ok(response) => response,
@@ -71,7 +101,7 @@ async fn call(method: &str, token: &str, body: &Value) -> Result<Outcome> {
     if (200..300).contains(&status)
         && let Some(Answer { ok: true, .. }) = answer
     {
-        return Ok(Ok(()));
+        return Ok(Ok(text));
     }
     let error = answer
         .and_then(|answer| answer.error)
@@ -83,15 +113,30 @@ async fn call(method: &str, token: &str, body: &Value) -> Result<Outcome> {
     }))
 }
 
-pub async fn auth_test(token: &str) -> Result<Outcome> {
-    call("auth.test", token, &json!({})).await
+pub async fn post_message(token: &str, channel: &str, text: &str) -> Result<Outcome<()>> {
+    let headers = Headers::new();
+    headers.set("Authorization", &format!("Bearer {token}"))?;
+    headers.set("Content-Type", "application/json; charset=utf-8")?;
+    let body = json!({ "channel": channel, "text": text }).to_string();
+    Ok(call("chat.postMessage", headers, body).await?.map(|_| ()))
 }
 
-pub async fn post_message(token: &str, channel: &str, text: &str) -> Result<Outcome> {
-    call(
-        "chat.postMessage",
-        token,
-        &json!({ "channel": channel, "text": text }),
-    )
-    .await
+pub async fn oauth_access(code: &OAuthCode<'_>) -> Result<Outcome<Installed>> {
+    let headers = Headers::new();
+    headers.set("Content-Type", "application/x-www-form-urlencoded")?;
+    let body = form(&[
+        ("code", code.code),
+        ("client_id", code.client_id),
+        ("client_secret", code.client_secret),
+        ("redirect_uri", code.redirect_uri),
+    ]);
+    let text = match call("oauth.v2.access", headers, body).await? {
+        Ok(text) => text,
+        Err(error) => return Ok(Err(error)),
+    };
+    Ok(serde_json::from_str::<Installed>(&text).map_err(|error| {
+        SlackError::Failed(format!(
+            "Slack oauth.v2.access answered ok without a bot token and team: {error}"
+        ))
+    }))
 }

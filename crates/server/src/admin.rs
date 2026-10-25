@@ -18,6 +18,7 @@ thread_local! {
 pub struct ApiRequest {
     pub method: Method,
     pub path: String,
+    pub origin: String,
     pub admin: String,
     pub body: Value,
     pub query: Vec<(String, String)>,
@@ -178,6 +179,7 @@ pub async fn handle(mut req: Request, env: &Env, ctx: &Context) -> Result<Respon
         ApiRequest {
             method: req.method(),
             path: url.path().to_string(),
+            origin: url.origin().ascii_serialization(),
             admin,
             body,
             query: url

@@ -4,17 +4,14 @@ use worker::*;
 
 use crate::admin::{ApiRequest, Me};
 use crate::github::{self, Credentials, GitHubError};
-use crate::slack::{self, SlackError};
 use crate::store::{self, AppInput, Client, ClientRemoval, GitHubAppKey, NewGitHubApp, Removal};
-use crate::{deliver, refuse};
+use crate::{deliver, refuse, slack_routes, slack_store};
 
 const NAME_MAX: usize = 80;
 const DESCRIPTION_MAX: usize = 500;
 const OWNER_MAX: usize = 39;
 const REPO_MAX: usize = 100;
 const CHANNEL_MAX: usize = 80;
-const TOKEN_MAX: usize = 255;
-const BOT_TOKEN_PREFIX: &str = "xoxb-";
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const STATE_MINUTES: u32 = 15;
 const CODE_MAX: usize = 100;
@@ -48,17 +45,17 @@ struct CreatedClient {
     secret: String,
 }
 
-type Checked<T> = std::result::Result<T, String>;
+pub(crate) type Checked<T> = std::result::Result<T, String>;
 
-fn invalid(message: &str) -> Result<Response> {
+pub(crate) fn invalid(message: &str) -> Result<Response> {
     refuse(400, "Invalid", message)
 }
 
-fn not_found(what: &str, id: &str) -> Result<Response> {
+pub(crate) fn not_found(what: &str, id: &str) -> Result<Response> {
     refuse(404, "NotFound", &format!("no {what} with id {id}"))
 }
 
-fn no_route(request: &ApiRequest) -> Result<Response> {
+pub(crate) fn no_route(request: &ApiRequest) -> Result<Response> {
     refuse(
         404,
         "NotFound",
@@ -66,7 +63,7 @@ fn no_route(request: &ApiRequest) -> Result<Response> {
     )
 }
 
-fn text_field(body: &Value, field: &str, min: usize, max: usize) -> Checked<String> {
+pub(crate) fn text_field(body: &Value, field: &str, min: usize, max: usize) -> Checked<String> {
     let Some(value) = body.get(field).and_then(Value::as_str) else {
         return Err(format!("{field} must be a string"));
     };
@@ -153,7 +150,7 @@ fn github_failure(error: GitHubError) -> Result<Response> {
     }
 }
 
-fn created<T: Serialize>(value: &T) -> Result<Response> {
+pub(crate) fn created<T: Serialize>(value: &T) -> Result<Response> {
     Ok(Response::from_json(value)?.with_status(201))
 }
 
@@ -392,50 +389,8 @@ async fn retry(env: &Env, ctx: &Context, report_id: &str) -> Result<Response> {
     Response::from_json(&report)
 }
 
-fn no_content() -> Result<Response> {
+pub(crate) fn no_content() -> Result<Response> {
     Ok(Response::empty()?.with_status(204))
-}
-
-fn bot_token(body: &Value) -> Checked<String> {
-    let token = text_field(body, "botToken", 1, TOKEN_MAX)?;
-    if !token.starts_with(BOT_TOKEN_PREFIX) {
-        return Err(format!(
-            "botToken must be a Slack bot token starting with {BOT_TOKEN_PREFIX}"
-        ));
-    }
-    Ok(token)
-}
-
-async fn create_workspace(db: &D1Database, body: &Value) -> Result<Response> {
-    let checked = text_field(body, "name", 1, NAME_MAX)
-        .and_then(|name| bot_token(body).map(|token| (name, token)));
-    let (name, token) = match checked {
-        Ok(checked) => checked,
-        Err(message) => return invalid(&message),
-    };
-    match slack::auth_test(&token).await? {
-        Ok(()) => created(&store::create_workspace(db, &name, &token).await?),
-        Err(SlackError::Refused { status, error, .. }) if (200..300).contains(&status) => {
-            invalid(&format!("Slack auth.test refused the token: {error}"))
-        }
-        Err(error) => refuse(
-            502,
-            "SlackFailed",
-            &format!("Slack auth.test failed: {}", error.failure()),
-        ),
-    }
-}
-
-async fn delete_workspace(db: &D1Database, workspace_id: &str) -> Result<Response> {
-    match store::delete_workspace(db, workspace_id).await? {
-        Removal::Removed => no_content(),
-        Removal::Missing => not_found("Slack workspace", workspace_id),
-        Removal::InUse(count) => refuse(
-            409,
-            "InUse",
-            &format!("{count} app(s) post to this workspace; remove their Slack channel first"),
-        ),
-    }
 }
 
 async fn put_app_slack(db: &D1Database, app_id: &str, body: &Value) -> Result<Response> {
@@ -449,7 +404,10 @@ async fn put_app_slack(db: &D1Database, app_id: &str, body: &Value) -> Result<Re
     if store::get_app(db, app_id).await?.is_none() {
         return not_found("app", app_id);
     }
-    if store::get_workspace(db, &workspace_id).await?.is_none() {
+    if slack_store::get_workspace(db, &workspace_id)
+        .await?
+        .is_none()
+    {
         return not_found("Slack workspace", &workspace_id);
     }
     store::set_app_slack(db, app_id, &workspace_id, &channel).await?;
@@ -501,13 +459,7 @@ pub async fn route(request: ApiRequest, env: &Env, ctx: &Context) -> Result<Resp
         (Method::Post, ["clients", client_id, "revoke"]) => {
             revoke_client(&env.d1("DB")?, client_id).await
         }
-        (Method::Get, ["slack", "workspaces"]) => {
-            Response::from_json(&store::list_workspaces(&env.d1("DB")?).await?)
-        }
-        (Method::Post, ["slack", "workspaces"]) => create_workspace(&env.d1("DB")?, body).await,
-        (Method::Delete, ["slack", "workspaces", workspace_id]) => {
-            delete_workspace(&env.d1("DB")?, workspace_id).await
-        }
+        (_, ["slack", ..]) => slack_routes::route(&request, env).await,
         (Method::Put, ["apps", app_id, "slack"]) => {
             put_app_slack(&env.d1("DB")?, app_id, body).await
         }

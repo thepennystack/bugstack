@@ -7,6 +7,8 @@ pub mod random;
 pub mod routes;
 pub mod sign;
 pub mod slack;
+pub mod slack_routes;
+pub mod slack_store;
 pub mod store;
 pub mod uploads;
 
