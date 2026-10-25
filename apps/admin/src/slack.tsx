@@ -11,8 +11,17 @@ import {
   type Workspace,
 } from "./api";
 import { Failure } from "./notices";
+import { ExternalIcon, Loading, PageHeader, When } from "./ui";
 
 const WORKSPACES = ["slack", "workspaces"];
+
+const MANIFEST = {
+  display_information: { name: "bugstack", description: "Bug reports filed as GitHub issues" },
+  features: { bot_user: { display_name: "bugstack", always_online: false } },
+  oauth_config: { scopes: { bot: ["chat:write"] } },
+};
+
+const CREATE_SLACK_APP = `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(JSON.stringify(MANIFEST))}`;
 
 const NewWorkspace = () => {
   const queryClient = useQueryClient();
@@ -27,41 +36,64 @@ const NewWorkspace = () => {
     },
   });
   return (
-    <form
-      class="form"
-      onSubmit={(event) => {
-        event.preventDefault();
-        create.mutate();
-      }}
-    >
-      <h3>Add a workspace</h3>
-      <label>
-        Name
-        <input
-          name="workspaceName"
-          required
-          maxLength={80}
-          value={name}
-          onInput={(event) => setName(event.currentTarget.value)}
-        />
-      </label>
-      <label>
-        Bot token
-        <input
-          name="botToken"
-          type="password"
-          autoComplete="off"
-          required
-          placeholder="xoxb-…"
-          value={botToken}
-          onInput={(event) => setBotToken(event.currentTarget.value)}
-        />
-      </label>
-      {create.isError && <Failure what="Adding the workspace" error={create.error} />}
-      <button type="submit" disabled={create.isPending}>
-        {create.isPending ? "Checking the token…" : "Add workspace"}
-      </button>
-    </form>
+    <article class="form-card">
+      <header>
+        <h3>Add a workspace</h3>
+        <p class="muted">bugstack checks the token with Slack before it stores it.</p>
+      </header>
+      <ol class="how-to">
+        <li>
+          <a href={CREATE_SLACK_APP} target="_blank" rel="noreferrer" class="with-icon">
+            Create a Slack app
+            <ExternalIcon />
+          </a>{" "}
+          from the prefilled manifest, then install it in your workspace.
+        </li>
+        <li>
+          Paste its <code class="mono">xoxb-</code> bot token below.
+        </li>
+        <li>
+          Run <code class="mono">/invite @bugstack</code> in each channel an app posts to.
+        </li>
+      </ol>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          create.mutate();
+        }}
+      >
+        <div class="grid">
+          <label>
+            Name
+            <input
+              name="workspaceName"
+              required
+              maxLength={80}
+              placeholder="Acme"
+              value={name}
+              onInput={(event) => setName(event.currentTarget.value)}
+            />
+          </label>
+          <label>
+            Bot token
+            <input
+              name="botToken"
+              type="password"
+              class="mono"
+              autoComplete="off"
+              required
+              placeholder="xoxb-…"
+              value={botToken}
+              onInput={(event) => setBotToken(event.currentTarget.value)}
+            />
+          </label>
+        </div>
+        {create.isError && <Failure what="Adding the workspace" error={create.error} />}
+        <button type="submit" aria-busy={create.isPending} disabled={create.isPending}>
+          {create.isPending ? "Checking the token…" : "Add workspace"}
+        </button>
+      </form>
+    </article>
   );
 };
 
@@ -73,7 +105,13 @@ const DeleteWorkspace = ({ workspace }: { workspace: Workspace }) => {
   });
   return (
     <>
-      <button type="button" disabled={remove.isPending} onClick={() => remove.mutate()}>
+      <button
+        type="button"
+        class="secondary outline small"
+        aria-busy={remove.isPending}
+        disabled={remove.isPending}
+        onClick={() => remove.mutate()}
+      >
         {remove.isPending ? "Deleting…" : "Delete"}
       </button>
       {remove.isError && <Failure what={`Deleting ${workspace.name}`} error={remove.error} />}
@@ -81,50 +119,53 @@ const DeleteWorkspace = ({ workspace }: { workspace: Workspace }) => {
   );
 };
 
+const WorkspaceCard = ({ workspace }: { workspace: Workspace }) => (
+  <article class="card">
+    <header>
+      <h3>{workspace.name}</h3>
+    </header>
+    <ul class="meta">
+      <li>
+        <span class="meta-label">Workspace id</span>
+        <span class="mono">{workspace.workspaceId}</span>
+      </li>
+      <li>
+        <span class="meta-label">Added</span>
+        <When iso={workspace.createdAt} />
+      </li>
+    </ul>
+    <footer class="card-actions">
+      <DeleteWorkspace workspace={workspace} />
+    </footer>
+  </article>
+);
+
 export const Workspaces = () => {
   const workspaces = useQuery({ queryKey: WORKSPACES, queryFn: listWorkspaces });
   return (
-    <section>
-      <h2>Slack workspaces</h2>
-      <p>
-        Create a Slack app with the bot scope <code>chat:write</code>, install it, paste its{" "}
-        <code>xoxb-</code> token here, and <code>/invite @bugstack</code> in each channel.
-      </p>
-      {workspaces.isPending && <p>Loading Slack workspaces…</p>}
+    <>
+      <PageHeader
+        title="Slack workspaces"
+        description="Workspaces whose channels can get a link to each new issue."
+      />
+      {workspaces.isPending && <Loading what="Slack workspaces" />}
       {workspaces.isError && (
         <Failure what="Loading the Slack workspaces" error={workspaces.error} />
       )}
       {workspaces.isSuccess && workspaces.data.length === 0 && (
-        <p>No Slack workspaces yet. Add one below to post reports to a channel.</p>
+        <p class="empty-line">
+          No Slack workspaces yet. Add one below, then pick a channel on an app.
+        </p>
       )}
       {workspaces.isSuccess && workspaces.data.length > 0 && (
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Workspace id</th>
-              <th>Created</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {workspaces.data.map((workspace) => (
-              <tr key={workspace.workspaceId}>
-                <td>{workspace.name}</td>
-                <td>
-                  <code>{workspace.workspaceId}</code>
-                </td>
-                <td>{workspace.createdAt}</td>
-                <td>
-                  <DeleteWorkspace workspace={workspace} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div class="card-grid">
+          {workspaces.data.map((workspace) => (
+            <WorkspaceCard key={workspace.workspaceId} workspace={workspace} />
+          ))}
+        </div>
       )}
       <NewWorkspace />
-    </section>
+    </>
   );
 };
 
@@ -148,7 +189,7 @@ const SlackForm = ({ app, workspaces }: { app: App; workspaces: Workspace[] }) =
   const current = workspaces.find((workspace) => workspace.workspaceId === app.slack?.workspaceId);
   return (
     <>
-      <p>
+      <p class="field-note">
         {app.slack === null
           ? "Reports from this app go to GitHub only."
           : `Reports post to ${app.slack.channel} in ${current?.name ?? app.slack.workspaceId}.`}
@@ -187,14 +228,22 @@ const SlackForm = ({ app, workspaces }: { app: App; workspaces: Workspace[] }) =
             onInput={(event) => setChannel(event.currentTarget.value)}
           />
         </label>
-        <button type="submit" disabled={save.isPending}>
-          {save.isPending ? "Saving…" : "Save Slack channel"}
-        </button>
-        {app.slack !== null && (
-          <button type="button" disabled={remove.isPending} onClick={() => remove.mutate()}>
-            {remove.isPending ? "Removing…" : "Remove Slack"}
+        <div class="actions">
+          <button type="submit" aria-busy={save.isPending} disabled={save.isPending}>
+            {save.isPending ? "Saving…" : "Save Slack channel"}
           </button>
-        )}
+          {app.slack !== null && (
+            <button
+              type="button"
+              class="secondary outline"
+              aria-busy={remove.isPending}
+              disabled={remove.isPending}
+              onClick={() => remove.mutate()}
+            >
+              {remove.isPending ? "Removing…" : "Remove Slack"}
+            </button>
+          )}
+        </div>
       </form>
       {save.isError && <Failure what="Saving the Slack channel" error={save.error} />}
       {remove.isError && <Failure what="Removing the Slack channel" error={remove.error} />}
@@ -204,12 +253,12 @@ const SlackForm = ({ app, workspaces }: { app: App; workspaces: Workspace[] }) =
 
 export const AppSlack = ({ app }: { app: App }) => {
   const workspaces = useQuery({ queryKey: WORKSPACES, queryFn: listWorkspaces });
-  if (workspaces.isPending) return <p>Loading Slack workspaces…</p>;
+  if (workspaces.isPending) return <Loading what="Slack workspaces" />;
   if (workspaces.isError)
     return <Failure what="Loading the Slack workspaces" error={workspaces.error} />;
   if (workspaces.data.length === 0) {
     return (
-      <p>
+      <p class="empty-line">
         No Slack workspaces yet. <Link href="/slack">Add one</Link> to post this app's reports to a
         channel.
       </p>

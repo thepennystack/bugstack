@@ -1,6 +1,6 @@
 import { ApiError } from "./api";
 
-const ISSUES = "https://github.com/thepennystack/bugstack/issues/new";
+export const ISSUES = "https://github.com/thepennystack/bugstack/issues/new";
 
 const likelyFix = (error: unknown): string => {
   if (!(error instanceof ApiError)) return "Check your network connection, then reload the page.";
@@ -15,13 +15,20 @@ const describe = (error: unknown): string => {
 };
 
 export const SignedOut = () => (
-  <section class="notice" role="alert">
-    <h2>Signed out</h2>
-    <p>Your Cloudflare Access session has ended or does not belong to the bugstack admin.</p>
-    <a class="button" href={window.location.href}>
-      Sign in again
-    </a>
-  </section>
+  <article class="callout callout-warning" role="alert">
+    <header>
+      <h2>You are signed out</h2>
+    </header>
+    <p>
+      Your Cloudflare Access session has ended, or the account you signed in with is not the
+      bugstack admin. Sign in again to pick up where you left off.
+    </p>
+    <footer>
+      <a class="button" href={window.location.href}>
+        Sign in again
+      </a>
+    </footer>
+  </article>
 );
 
 export const Failure = ({ what, error }: { what: string; error: unknown }) => {
@@ -33,15 +40,22 @@ export const Failure = ({ what, error }: { what: string; error: unknown }) => {
     `${what} failed.\n\n\`\`\`\n${detail}\n\`\`\`\n\nPage: ${window.location.href}\n`,
   );
   return (
-    <section class="notice" role="alert">
-      <h2>{what} failed</h2>
-      <p>
-        <code>{detail}</code>
-      </p>
+    <article class="callout callout-error" role="alert">
+      <header>
+        <h2>{what} failed</h2>
+      </header>
       <p>{likelyFix(error)}</p>
-      <a href={report.toString()} target="_blank" rel="noreferrer">
-        Report an issue
-      </a>
-    </section>
+      <pre class="mono">{detail}</pre>
+      <footer>
+        <a
+          class="button secondary outline"
+          href={report.toString()}
+          target="_blank"
+          rel="noreferrer"
+        >
+          Report an issue
+        </a>
+      </footer>
+    </article>
   );
 };

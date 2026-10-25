@@ -3,6 +3,7 @@ import { useState } from "preact/hooks";
 import { Link, useSearch } from "wouter-preact";
 import { createManifestState, deleteGitHubApp, type GitHubApp, listGitHubApps } from "./api";
 import { Failure } from "./notices";
+import { ExternalIcon, Loading, PageHeader, When } from "./ui";
 
 export const GITHUB_APPS = ["github", "apps"];
 
@@ -31,6 +32,9 @@ const newAppUrl = (org: string, state: string): string => {
   if (org === "") return `https://github.com/settings/apps/new?${query}`;
   return `https://github.com/organizations/${encodeURIComponent(org)}/settings/apps/new?${query}`;
 };
+
+const installUrl = (slug: string): string =>
+  `https://github.com/apps/${encodeURIComponent(slug)}/installations/new`;
 
 const postToGitHub = (action: string, manifest: object) => {
   const form = document.createElement("form");
@@ -63,44 +67,51 @@ const CreateGitHubApp = () => {
     },
   });
   return (
-    <form
-      class="form"
-      onSubmit={(event) => {
-        event.preventDefault();
-        create.mutate();
-      }}
-    >
-      <h3>Create GitHub App</h3>
-      <p>
-        GitHub opens its app form filled in from a manifest, then sends you back here with the
-        credentials. Leave the organization empty to create the app on your personal account.
-      </p>
-      <label>
-        GitHub organization
-        <input
-          name="org"
-          placeholder="personal account"
-          value={org}
-          onInput={(event) => setOrg(event.currentTarget.value)}
-        />
-      </label>
-      <label>
-        Name suffix
-        <input
-          name="suffix"
-          maxLength={NAME_MAX - "bugstack".length}
-          value={suffix}
-          onInput={(event) => setSuffix(event.currentTarget.value)}
-        />
-      </label>
-      <p>
-        The app will be called <code>{name}</code>.
-      </p>
-      {create.isError && <Failure what="Creating the GitHub App" error={create.error} />}
-      <button type="submit" disabled={create.isPending}>
-        {create.isPending ? "Opening GitHub…" : "Create GitHub App"}
-      </button>
-    </form>
+    <article class="form-card">
+      <header>
+        <h3>Create GitHub App</h3>
+        <p class="muted">
+          GitHub opens its app form already filled in, you confirm, and it sends you back here with
+          the app's credentials.
+        </p>
+      </header>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          create.mutate();
+        }}
+      >
+        <div class="grid">
+          <label>
+            GitHub organization
+            <input
+              name="org"
+              placeholder="personal account"
+              value={org}
+              onInput={(event) => setOrg(event.currentTarget.value)}
+            />
+            <small>Leave empty to create the app on your personal account.</small>
+          </label>
+          <label>
+            Name suffix
+            <input
+              name="suffix"
+              class="mono"
+              maxLength={NAME_MAX - "bugstack".length}
+              value={suffix}
+              onInput={(event) => setSuffix(event.currentTarget.value)}
+            />
+            <small>
+              The app will be called <code class="mono">{name}</code>.
+            </small>
+          </label>
+        </div>
+        {create.isError && <Failure what="Creating the GitHub App" error={create.error} />}
+        <button type="submit" aria-busy={create.isPending} disabled={create.isPending}>
+          {create.isPending ? "Opening GitHub…" : "Create GitHub App"}
+        </button>
+      </form>
+    </article>
   );
 };
 
@@ -112,7 +123,13 @@ const DeleteGitHubApp = ({ app }: { app: GitHubApp }) => {
   });
   return (
     <>
-      <button type="button" disabled={remove.isPending} onClick={() => remove.mutate()}>
+      <button
+        type="button"
+        class="secondary outline small"
+        aria-busy={remove.isPending}
+        disabled={remove.isPending}
+        onClick={() => remove.mutate()}
+      >
         {remove.isPending ? "Deleting…" : "Delete"}
       </button>
       {remove.isError && <Failure what={`Deleting ${app.name}`} error={remove.error} />}
@@ -120,81 +137,95 @@ const DeleteGitHubApp = ({ app }: { app: GitHubApp }) => {
   );
 };
 
+const GitHubAppCard = ({ app }: { app: GitHubApp }) => (
+  <article class="card">
+    <header>
+      <h3>
+        <a href={app.htmlUrl} target="_blank" rel="noreferrer" class="with-icon">
+          {app.name}
+          <ExternalIcon />
+        </a>
+      </h3>
+    </header>
+    <ul class="meta">
+      <li>
+        <span class="meta-label">Owner</span>
+        <span class="mono">{app.ownerLogin}</span>
+      </li>
+      <li>
+        <span class="meta-label">Slug</span>
+        <span class="mono">{app.slug}</span>
+      </li>
+      <li>
+        <span class="meta-label">Created</span>
+        <When iso={app.createdAt} />
+      </li>
+    </ul>
+    <footer class="card-actions">
+      <a class="button small" href={installUrl(app.slug)} target="_blank" rel="noreferrer">
+        Install
+      </a>
+      <DeleteGitHubApp app={app} />
+    </footer>
+  </article>
+);
+
+const Steps = () => (
+  <article class="empty">
+    <h3>No GitHub App yet</h3>
+    <p>bugstack files issues through a GitHub App you own. Two steps:</p>
+    <ol>
+      <li>Create the app with the form below; GitHub asks you to confirm.</li>
+      <li>
+        Install it on each account whose repositories should receive issues, then pick the
+        installation on an app.
+      </li>
+    </ol>
+  </article>
+);
+
 export const GitHubApps = () => {
   const apps = useQuery({ queryKey: GITHUB_APPS, queryFn: listGitHubApps });
   const created = new URLSearchParams(useSearch()).get("created");
   return (
-    <section>
-      <h2>GitHub Apps</h2>
+    <>
+      <PageHeader
+        title="GitHub Apps"
+        description="The GitHub Apps bugstack files issues through, and where they are installed."
+      />
       {created !== null && (
-        <section class="notice" role="status">
-          <h3>Created {created}</h3>
+        <article class="callout callout-success" role="status">
+          <header>
+            <h3>Created {created}</h3>
+          </header>
           <p>
             Install it on the accounts whose repositories receive issues, then pick the installation
             on each app.
           </p>
-          <a
-            class="button"
-            href={`https://github.com/apps/${encodeURIComponent(created)}/installations/new`}
-          >
-            Install {created}
-          </a>
-        </section>
+          <footer>
+            <a class="button" href={installUrl(created)}>
+              Install {created}
+            </a>
+          </footer>
+        </article>
       )}
-      {apps.isPending && <p>Loading GitHub Apps…</p>}
+      {apps.isPending && <Loading what="GitHub Apps" />}
       {apps.isError && <Failure what="Loading the GitHub Apps" error={apps.error} />}
-      {apps.isSuccess && apps.data.length === 0 && (
-        <p>No GitHub App yet. Create one below to file reports as issues.</p>
-      )}
+      {apps.isSuccess && apps.data.length === 0 && <Steps />}
       {apps.isSuccess && apps.data.length > 0 && (
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Slug</th>
-              <th>Owner</th>
-              <th>Install</th>
-              <th>Created</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {apps.data.map((app) => (
-              <tr key={app.githubAppId}>
-                <td>
-                  <a href={app.htmlUrl} target="_blank" rel="noreferrer">
-                    {app.name}
-                  </a>
-                </td>
-                <td>
-                  <code>{app.slug}</code>
-                </td>
-                <td>{app.ownerLogin}</td>
-                <td>
-                  <a
-                    href={`https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Install
-                  </a>
-                </td>
-                <td>{app.createdAt}</td>
-                <td>
-                  <DeleteGitHubApp app={app} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div class="card-grid">
+          {apps.data.map((app) => (
+            <GitHubAppCard key={app.githubAppId} app={app} />
+          ))}
+        </div>
       )}
       <CreateGitHubApp />
-    </section>
+    </>
   );
 };
 
 export const NoGitHubApp = () => (
-  <p>
+  <p class="field-note">
     No GitHub App yet. <Link href="/github">Create one</Link> and install it, then pick its
     installation here.
   </p>

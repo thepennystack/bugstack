@@ -14,6 +14,17 @@ export type Slack = {
   channel: string;
 };
 
+export type Counts = {
+  clients: number;
+  pending: number;
+  filed: number;
+  failed: number;
+};
+
+export type Health = {
+  commit: string;
+};
+
 export type App = {
   appId: string;
   name: string;
@@ -22,6 +33,7 @@ export type App = {
   installationId: number;
   githubRepo: string;
   slack: Slack | null;
+  counts: Counts;
   createdAt: string;
 };
 
@@ -132,6 +144,16 @@ const isMe: Guard<Me> = (value): value is Me => isRecord(value) && typeof value.
 const isSlack: Guard<Slack> = (value): value is Slack =>
   isRecord(value) && typeof value.workspaceId === "string" && typeof value.channel === "string";
 
+const isCounts: Guard<Counts> = (value): value is Counts =>
+  isRecord(value) &&
+  typeof value.clients === "number" &&
+  typeof value.pending === "number" &&
+  typeof value.filed === "number" &&
+  typeof value.failed === "number";
+
+const isHealth: Guard<Health> = (value): value is Health =>
+  isRecord(value) && typeof value.commit === "string";
+
 const isApp: Guard<App> = (value): value is App =>
   isRecord(value) &&
   typeof value.appId === "string" &&
@@ -141,6 +163,7 @@ const isApp: Guard<App> = (value): value is App =>
   typeof value.installationId === "number" &&
   typeof value.githubRepo === "string" &&
   (value.slack === null || isSlack(value.slack)) &&
+  isCounts(value.counts) &&
   typeof value.createdAt === "string";
 
 const isClient: Guard<Client> = (value): value is Client =>
@@ -267,6 +290,8 @@ const request = async <T>(
   }
   return data;
 };
+
+export const getHealth = (): Promise<Health> => request("GET", "/v1/health", isHealth);
 
 export const getMe = (): Promise<Me> => request("GET", "/api/me", isMe);
 
