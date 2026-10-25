@@ -134,6 +134,92 @@ article > footer {
   text-decoration: none;
 }
 
+.topbar nav ul.brand-group {
+  min-width: 0;
+  flex-shrink: 1;
+}
+
+.org-item {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.org-item::before {
+  content: "/";
+  color: var(--hairline);
+  font-size: 1.25rem;
+  margin-right: 0.6rem;
+}
+
+.org-name {
+  display: inline-block;
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+  font-weight: 600;
+}
+
+.org-switcher {
+  margin: 0;
+}
+
+.topbar .org-switcher > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 2.5rem;
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--hairline);
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--pico-color);
+  line-height: 1.25;
+}
+
+.topbar .org-switcher > summary::after {
+  margin-inline-start: 0.1rem;
+  height: 1rem;
+  float: none;
+}
+
+.topbar nav .org-switcher > summary + ul {
+  display: block;
+  min-width: 14rem;
+  width: max-content;
+  max-width: min(20rem, calc(100vw - 2rem));
+  left: 0;
+  right: auto;
+  margin: 0.25rem 0 0;
+  padding: 0.25rem 0;
+}
+
+.topbar nav .org-switcher > summary + ul li {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+.topbar nav .org-switcher > summary + ul li a {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  min-height: 44px;
+  margin: 0;
+  padding: 0.5rem 1rem;
+  border-radius: 0;
+  overflow-wrap: anywhere;
+}
+
+.topbar .org-switcher > ul a[aria-current="true"] {
+  font-weight: 600;
+  color: var(--pico-primary);
+}
+
 .brand-mark {
   color: var(--pico-primary-background);
   flex: none;
@@ -354,6 +440,11 @@ nav[aria-label="breadcrumb"] ul li {
 .badge-active {
   background: var(--badge-green-bg);
   color: var(--badge-green-fg);
+}
+
+.badge-owner {
+  background: color-mix(in srgb, var(--pico-primary-background) 16%, transparent);
+  color: var(--pico-primary);
 }
 
 .badge-failed {
@@ -874,16 +965,32 @@ code.secret {
 
 @media (max-width: 640px) {
   .topbar nav {
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
+    row-gap: 0;
+    padding-top: 0.35rem;
+  }
+
+  .topbar nav ul.nav-links {
+    order: 3;
+    flex: 1 1 100%;
+    justify-content: space-between;
+    margin-inline: 0;
+  }
+
+  .topbar nav ul.nav-links:empty {
+    display: none;
+  }
+
+  .org-name {
+    max-width: 10rem;
+  }
+
+  .topbar .org-switcher > summary {
+    min-height: 44px;
   }
 
   .topbar nav li {
     padding: 0.25rem 0.15rem;
-  }
-
-  .topbar nav ul.nav-links {
-    margin-left: 0;
-    margin-right: auto;
   }
 
   .nav-links a {

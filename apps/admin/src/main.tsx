@@ -4,9 +4,10 @@ import { Link, Redirect, Route, Router, Switch, useLocation } from "wouter-preac
 import { getHealth, getMe, isUnauthorized, type Me, type OrgMembership, selectOrg } from "./api";
 import { AppList, AppPage, EditApp, NewApp } from "./apps";
 import { GitHubInstallations } from "./github";
-import { Failure, ISSUES, SignedOut } from "./notices";
+import { Failure, ISSUES, NotAMember, SignedOut } from "./notices";
+import { CreateOrg, Members, orgHome } from "./orgs";
 import { Workspaces } from "./slack";
-import { BrandMark, PageHeader, REPO } from "./ui";
+import { BrandMark, PageHeader, PlusIcon, REPO } from "./ui";
 import "@picocss/pico/css/pico.indigo.min.css";
 import "./style.css";
 
@@ -31,6 +32,7 @@ const NAV = [
   { href: "/apps", label: "Apps", active: (path: string) => path.startsWith("/apps") },
   { href: "/github", label: "GitHub", active: (path: string) => path.startsWith("/github") },
   { href: "/slack", label: "Slack", active: (path: string) => path.startsWith("/slack") },
+  { href: "/members", label: "Members", active: (path: string) => path.startsWith("/members") },
 ];
 
 const Identity = ({ identity, pending }: { identity: string | undefined; pending: boolean }) => {
@@ -47,37 +49,89 @@ const Identity = ({ identity, pending }: { identity: string | undefined; pending
   );
 };
 
-const TopNav = ({ identity, pending }: { identity: string | undefined; pending: boolean }) => {
-  const [path] = useLocation();
+const OrgSwitcher = ({ current, orgs }: { current: OrgMembership; orgs: OrgMembership[] }) => {
+  if (orgs.length < 2) {
+    return (
+      <span class="org-name" title={current.name}>
+        {current.name}
+      </span>
+    );
+  }
   return (
-    <header class="topbar">
-      <nav class="container">
-        <ul>
-          <li>
-            <Link href="/apps" class="brand">
-              <BrandMark />
-              <span>bugstack</span>
-            </Link>
+    <details class="dropdown org-switcher">
+      <summary aria-label={`Organisation ${current.name}, switch`}>
+        <span class="org-name">{current.name}</span>
+      </summary>
+      <ul>
+        {orgs.map((org) => (
+          <li key={org.orgId}>
+            <a
+              href={orgHome(org.orgId)}
+              aria-current={org.orgId === current.orgId ? "true" : undefined}
+            >
+              {org.name}
+            </a>
           </li>
-        </ul>
-        <ul class="nav-links">
-          {NAV.map((item) => (
-            <li key={item.href}>
-              <Link href={item.href} aria-current={item.active(path) ? "page" : undefined}>
-                {item.label}
-              </Link>
-            </li>
-          ))}
-        </ul>
-        <ul>
-          <li>
-            <Identity identity={identity} pending={pending} />
-          </li>
-        </ul>
-      </nav>
-    </header>
+        ))}
+        <li>
+          <a href="/orgs/new" class="with-icon">
+            <PlusIcon />
+            Create another
+          </a>
+        </li>
+      </ul>
+    </details>
   );
 };
+
+const NavLinks = () => {
+  const [path] = useLocation();
+  return (
+    <ul class="nav-links">
+      {NAV.map((item) => (
+        <li key={item.href}>
+          <Link href={item.href} aria-current={item.active(path) ? "page" : undefined}>
+            {item.label}
+          </Link>
+        </li>
+      ))}
+    </ul>
+  );
+};
+
+const TopNav = ({
+  me,
+  current,
+  pending,
+}: {
+  me: Me | undefined;
+  current: OrgMembership | undefined;
+  pending: boolean;
+}) => (
+  <header class="topbar">
+    <nav class="container">
+      <ul class="brand-group">
+        <li>
+          <a href="/" class="brand">
+            <BrandMark />
+            <span>bugstack</span>
+          </a>
+        </li>
+        {current !== undefined && me !== undefined && (
+          <li class="org-item">
+            <OrgSwitcher current={current} orgs={me.orgs} />
+          </li>
+        )}
+      </ul>
+      {current === undefined ? <ul class="nav-links" /> : <NavLinks />}
+      <ul>
+        <li>
+          <Identity identity={me?.identity} pending={pending} />
+        </li>
+      </ul>
+    </nav>
+  </header>
+);
 
 const Deployed = () => {
   const health = useQuery({ queryKey: ["health"], queryFn: getHealth, staleTime: Infinity });
@@ -108,19 +162,7 @@ const Footer = () => (
   </footer>
 );
 
-const NoOrganisation = () => (
-  <article class="callout callout-warning" role="status">
-    <header>
-      <h2>No organisation yet</h2>
-    </header>
-    <p>
-      You are signed in, but no bugstack organisation has added you. Ask an Owner to add your email
-      address.
-    </p>
-  </article>
-);
-
-const OrgRoutes = () => {
+const OrgRoutes = ({ org, identity }: { org: OrgMembership; identity: string }) => {
   const [path] = useLocation();
   if (path.startsWith("~") || path === "/") return <Redirect to="/apps" replace />;
   return (
@@ -128,6 +170,9 @@ const OrgRoutes = () => {
       <Route path="/apps" component={AppList} />
       <Route path="/github" component={GitHubInstallations} />
       <Route path="/slack" component={Workspaces} />
+      <Route path="/members">
+        <Members org={org} identity={identity} />
+      </Route>
       <Route path="/apps/new" component={NewApp} />
       <Route path="/apps/:appId/edit" component={EditApp} />
       <Route path="/apps/:appId" component={AppPage} />
@@ -138,29 +183,32 @@ const OrgRoutes = () => {
 
 const Frame = ({
   me,
+  current,
   pending,
   children,
 }: {
   me: Me | undefined;
+  current?: OrgMembership;
   pending: boolean;
   children: ComponentChildren;
 }) => (
   <>
-    <TopNav identity={me?.identity} pending={pending} />
+    <TopNav me={me} current={current} pending={pending} />
     <main class="container">{children}</main>
     <Footer />
   </>
 );
 
 const ORG_PATH = /^\/orgs\/([^/]+)/;
+const NEW_ORG = "/orgs/new";
 
-const pickOrg = (orgs: OrgMembership[]): OrgMembership | undefined => {
-  const named = window.location.pathname.match(ORG_PATH)?.[1];
-  const wanted = named === undefined ? undefined : decodeURIComponent(named);
-  return orgs.find((org) => org.orgId === wanted) ?? orgs[0];
+const orgInPath = (path: string): string | undefined => {
+  const named = path.match(ORG_PATH)?.[1];
+  return named === undefined ? undefined : decodeURIComponent(named);
 };
 
 const Shell = () => {
+  const [path] = useLocation();
   const me = useQuery({ queryKey: ["me"], queryFn: getMe });
   if (me.isError && isUnauthorized(me.error)) {
     return (
@@ -182,19 +230,31 @@ const Shell = () => {
         {null}
       </Frame>
     );
-  const org = pickOrg(me.data.orgs);
+  const [first] = me.data.orgs;
+  if (path === NEW_ORG || path === `${NEW_ORG}/`) {
+    return (
+      <Frame me={me.data} pending={false}>
+        <CreateOrg first={first} />
+      </Frame>
+    );
+  }
+  const named = orgInPath(path);
+  if (named === undefined) {
+    return <Redirect to={first === undefined ? NEW_ORG : orgHome(first.orgId)} replace />;
+  }
+  const org = me.data.orgs.find((each) => each.orgId === named);
   if (org === undefined) {
     return (
       <Frame me={me.data} pending={false}>
-        <NoOrganisation />
+        <NotAMember />
       </Frame>
     );
   }
   selectOrg(org.orgId);
   return (
     <Router base={`/orgs/${encodeURIComponent(org.orgId)}`}>
-      <Frame me={me.data} pending={false}>
-        <OrgRoutes />
+      <Frame me={me.data} current={org} pending={false}>
+        <OrgRoutes org={org} identity={me.data.identity} />
       </Frame>
     </Router>
   );

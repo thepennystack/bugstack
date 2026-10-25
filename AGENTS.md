@@ -47,24 +47,24 @@ An `org` owns apps, GitHub installations and Slack workspaces; `member` joins an
 
 Org scoping lives in the path. `...` below is `/api/orgs/{orgId}`: a caller outside that org is 403 `NotAMember`, an id that belongs to another org is 404, and an Owner-only route answers a `Member` 403 `NotAnOwner`.
 
-| Route | Rule |
-| --- | --- |
-| `GET /api/me` | `{identity, orgs: [{orgId, name, role}]}`, newest membership first |
-| `POST /api/orgs` `{name}` | 1 to 80 characters; 201 `{orgId, name, role}`, the caller is `Owner` |
-| `GET /api/github/setup?installation_id&setup_action&state` | GitHub's setup URL; see GitHub and Slack apps |
-| `GET /api/slack/oauth/callback?code&state` | see Slack |
-| `GET .../members` | `[{memberId, identity, role, createdAt}]` |
-| `POST .../members` `{email, role}` | Owner; lower-cases the email; 201, or 409 `AlreadyMember` |
-| `DELETE .../members/{memberId}` | Owner, or the caller's own row; 204, or 409 `LastOwner` for the last Owner |
-| `POST .../github/install` | 201 `{url}` |
-| `GET .../github/installations`, `GET .../github/installations/{id}/repos` | the org's own installations `[{installationId, account}]` and their repositories |
-| `DELETE .../github/installations/{id}` | 204, or 409 `InUse` while an app files through it |
-| `GET`/`POST .../apps`, `GET`/`PUT`/`DELETE .../apps/{appId}` | see below |
-| `POST .../apps/{appId}/clients`, `POST .../clients/{clientId}/revoke`, `DELETE .../clients/{clientId}` | see below |
-| `GET .../apps/{appId}/reports`, `POST .../reports/{reportId}/retry` | see below |
-| `GET .../slack/install` | 302 to Slack; see Slack |
-| `GET .../slack/workspaces`, `DELETE .../slack/workspaces/{workspaceId}` | `[{workspaceId, teamId, teamName, createdAt}]`; delete is 204, or 409 `InUse` while an app posts to it |
-| `PUT .../apps/{appId}/slack` `{workspaceId, channel}`, `DELETE .../apps/{appId}/slack` | 204; a workspace outside the org is 404 |
+| Route                                                                                                  | Rule                                                                                                   |
+| ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `GET /api/me`                                                                                          | `{identity, orgs: [{orgId, name, role}]}`, newest membership first                                     |
+| `POST /api/orgs` `{name}`                                                                              | 1 to 80 characters; 201 `{orgId, name, role}`, the caller is `Owner`                                   |
+| `GET /api/github/setup?installation_id&setup_action&state`                                             | GitHub's setup URL; see GitHub and Slack apps                                                          |
+| `GET /api/slack/oauth/callback?code&state`                                                             | see Slack                                                                                              |
+| `GET .../members`                                                                                      | `[{memberId, identity, role, createdAt}]`                                                              |
+| `POST .../members` `{email, role}`                                                                     | Owner; lower-cases the email; 201, or 409 `AlreadyMember`                                              |
+| `DELETE .../members/{memberId}`                                                                        | Owner, or the caller's own row; 204, or 409 `LastOwner` for the last Owner                             |
+| `POST .../github/install`                                                                              | 201 `{url}`                                                                                            |
+| `GET .../github/installations`, `GET .../github/installations/{id}/repos`                              | the org's own installations `[{installationId, account}]` and their repositories                       |
+| `DELETE .../github/installations/{id}`                                                                 | 204, or 409 `InUse` while an app files through it                                                      |
+| `GET`/`POST .../apps`, `GET`/`PUT`/`DELETE .../apps/{appId}`                                           | see below                                                                                              |
+| `POST .../apps/{appId}/clients`, `POST .../clients/{clientId}/revoke`, `DELETE .../clients/{clientId}` | see below                                                                                              |
+| `GET .../apps/{appId}/reports`, `POST .../reports/{reportId}/retry`                                    | see below                                                                                              |
+| `GET .../slack/install`                                                                                | 302 to Slack; see Slack                                                                                |
+| `GET .../slack/workspaces`, `DELETE .../slack/workspaces/{workspaceId}`                                | `[{workspaceId, teamId, teamName, createdAt}]`; delete is 204, or 409 `InUse` while an app posts to it |
+| `PUT .../apps/{appId}/slack` `{workspaceId, channel}`, `DELETE .../apps/{appId}/slack`                 | 204; a workspace outside the org is 404                                                                |
 
 Routes live in `crates/server/src/routes.rs` (apps, clients, reports and the org dispatch), `org_routes.rs` (me, orgs, members), `github_routes.rs` and `slack_routes.rs`; D1 queries in `store.rs`, `org_store.rs` and `slack_store.rs`, GitHub App calls in `github.rs`, Slack calls in `slack.rs`, the instance secrets in `fixtures.rs`.
 
@@ -74,7 +74,7 @@ An app carries `installationId`, 0 until one is picked; app create and put accep
 
 Bad input is 400 `Invalid`, an unknown id 404 `NotFound`. A GitHub key that does not import is 500 `KeyInvalid`. A missing instance secret is 503 `NotBootstrapped`, naming the secret. `migrations/` holds the schema. Smoke runs as the automation identity in org `ischen`, reuses the oldest app named `bugstack-smoke` and its client `agent`, deletes any younger duplicates, and deletes its revoked clients at the end; seed only through the API.
 
-The admin app keeps its response types by hand in `apps/admin/src/api.ts`, which reads `/api/me` once and prefixes every call with the org. Pages live under `/orgs/{orgId}/...`: the org in the URL when the caller is in it, else the first in `/api/me`; `/` redirects to that org's `/orgs/{orgId}/apps`, and an identity without orgs sees "No organisation yet". A 401 renders the signed-out notice; any other failure renders a notice with a prefilled issue link.
+The admin app keeps its response types by hand in `apps/admin/src/api.ts`, which reads `/api/me` once and prefixes every call with the org. Pages live under `/orgs/{orgId}/...` (Apps, GitHub, Slack, Members); an org the caller is not in renders the `NotAMember` notice linking `/`. `/` redirects to the first org in `/api/me`, or to `/orgs/new` (a name and a button) for an identity without orgs. The nav shows the current org's name, and a dropdown of the caller's orgs plus "Create another" when there is more than one; switching reloads the page. Members lists identity, role and joined date; Owners get Remove and an invite form, everyone gets Leave on their own row. A 401 renders the signed-out notice; 409 `AlreadyMember`, 409 `LastOwner` and 403 `NotAnOwner` render the refusal; any other failure renders a notice with a prefilled issue link.
 
 ## GitHub and Slack apps
 

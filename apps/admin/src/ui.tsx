@@ -82,7 +82,7 @@ export const Loading = ({ what }: { what: string }) => (
   </p>
 );
 
-type Tone = "Pending" | "Filed" | "Failed" | "Active" | "Revoked";
+type Tone = "Pending" | "Filed" | "Failed" | "Active" | "Revoked" | "Owner" | "Member";
 
 export const Badge = ({ tone, children }: { tone: Tone; children?: ComponentChildren }) => (
   <span class={`badge badge-${tone.toLowerCase()}`}>{children ?? tone}</span>

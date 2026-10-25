@@ -7,17 +7,24 @@ export const ConfirmDelete = ({
   queryKey,
   remove: removeFn,
   label = "Delete",
+  pending = "Deleting…",
+  onRemoved,
 }: {
   name: string;
   queryKey: string[];
   remove: () => Promise<undefined>;
   label?: string;
+  pending?: string;
+  onRemoved?: () => void;
 }) => {
   const queryClient = useQueryClient();
   const [confirming, setConfirming] = useState(false);
   const remove = useMutation({
     mutationFn: removeFn,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey }),
+    onSuccess: () => {
+      onRemoved?.();
+      return queryClient.invalidateQueries({ queryKey });
+    },
   });
   if (!confirming) {
     return (
@@ -39,13 +46,13 @@ export const ConfirmDelete = ({
           disabled={remove.isPending}
           onClick={() => remove.mutate()}
         >
-          {remove.isPending ? "Deleting…" : `Yes, ${label.toLowerCase()}`}
+          {remove.isPending ? pending : `Yes, ${label.toLowerCase()}`}
         </button>
         <button type="button" class="secondary outline" onClick={() => setConfirming(false)}>
           Cancel
         </button>
       </div>
-      {remove.isError && <Failure what={`Deleting ${name}`} error={remove.error} />}
+      {remove.isError && <Failure what={`${label} ${name}`} error={remove.error} />}
     </div>
   );
 };

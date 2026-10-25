@@ -19,10 +19,7 @@ export const SignedOut = () => (
     <header>
       <h2>You are signed out</h2>
     </header>
-    <p>
-      Your Cloudflare Access session has ended, or the account you signed in with is not the
-      bugstack admin. Sign in again to pick up where you left off.
-    </p>
+    <p>Your Cloudflare Access session has ended. Sign in again to pick up where you left off.</p>
     <footer>
       <a class="button" href={window.location.href}>
         Sign in again
@@ -47,8 +44,51 @@ export const NotBootstrapped = ({ error }: { error: ApiError }) => (
   </article>
 );
 
+export const NotAMember = () => (
+  <article class="callout callout-warning" role="status">
+    <header>
+      <h2>You are not in this organisation</h2>
+    </header>
+    <p>
+      This address belongs to an organisation your account is not a member of. Ask one of its Owners
+      to invite your email address, or go back to your own organisations.
+    </p>
+    <footer>
+      <a class="button" href="/">
+        Go to your organisations
+      </a>
+    </footer>
+  </article>
+);
+
+const REFUSALS: Record<string, string> = {
+  AlreadyMember: "Nothing changed: that address is already in this organisation.",
+  LastOwner: "An organisation keeps at least one Owner: invite another Owner first.",
+  NotAnOwner: "Ask an Owner of this organisation to do it.",
+};
+
+const refusalOf = (error: unknown): { error: ApiError; fix: string } | undefined => {
+  if (!(error instanceof ApiError)) return undefined;
+  const fix = REFUSALS[error.body.reason];
+  if (fix === undefined) return undefined;
+  return { error, fix };
+};
+
 export const Failure = ({ what, error }: { what: string; error: unknown }) => {
   if (isNotBootstrapped(error)) return <NotBootstrapped error={error} />;
+  if (error instanceof ApiError && error.body.reason === "NotAMember") return <NotAMember />;
+  const refusal = refusalOf(error);
+  if (refusal !== undefined) {
+    return (
+      <article class="callout callout-warning" role="status">
+        <header>
+          <h3>{what} was refused</h3>
+        </header>
+        <p>{refusal.error.body.message}</p>
+        <p class="field-note">{refusal.fix}</p>
+      </article>
+    );
+  }
   const detail = describe(error);
   const report = new URL(ISSUES);
   report.searchParams.set("title", `Admin: ${what} failed`);

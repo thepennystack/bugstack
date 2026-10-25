@@ -16,6 +16,18 @@ export type Me = {
   orgs: OrgMembership[];
 };
 
+export type Member = {
+  memberId: string;
+  identity: string;
+  role: Role;
+  createdAt: string;
+};
+
+export type MemberInput = {
+  email: string;
+  role: Role;
+};
+
 export type ClientStatus = "Active" | "Revoked";
 
 export type Slack = {
@@ -130,11 +142,20 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isErrorBody: Guard<ErrorBody> = (value): value is ErrorBody =>
   isRecord(value) && typeof value.reason === "string" && typeof value.message === "string";
 
+const isRole = (value: unknown): value is Role => value === "Owner" || value === "Member";
+
 const isOrgMembership: Guard<OrgMembership> = (value): value is OrgMembership =>
   isRecord(value) &&
   typeof value.orgId === "string" &&
   typeof value.name === "string" &&
-  (value.role === "Owner" || value.role === "Member");
+  isRole(value.role);
+
+const isMember: Guard<Member> = (value): value is Member =>
+  isRecord(value) &&
+  typeof value.memberId === "string" &&
+  typeof value.identity === "string" &&
+  isRole(value.role) &&
+  typeof value.createdAt === "string";
 
 const isMe: Guard<Me> = (value): value is Me =>
   isRecord(value) &&
@@ -289,6 +310,9 @@ export const getMe = (): Promise<Me> => {
   return me;
 };
 
+export const createOrg = (name: string): Promise<OrgMembership> =>
+  request("POST", "/api/orgs", isOrgMembership, { name });
+
 export const selectOrg = (orgId: string): void => {
   orgBase = `/api/orgs/${encodeURIComponent(orgId)}`;
 };
@@ -351,3 +375,11 @@ export const setAppSlack = (appId: string, slack: Slack): Promise<undefined> =>
 
 export const removeAppSlack = (appId: string): Promise<undefined> =>
   scoped("DELETE", `/apps/${encodeURIComponent(appId)}/slack`, isEmpty);
+
+export const listMembers = (): Promise<Member[]> => scoped("GET", "/members", listOf(isMember));
+
+export const addMember = (input: MemberInput): Promise<Member> =>
+  scoped("POST", "/members", isMember, input);
+
+export const removeMember = (memberId: string): Promise<undefined> =>
+  scoped("DELETE", `/members/${encodeURIComponent(memberId)}`, isEmpty);
