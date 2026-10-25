@@ -4,6 +4,7 @@ import { Link, Route, Switch } from "wouter-preact";
 import { getMe, isUnauthorized } from "./api";
 import { AppList, AppPage, EditApp, NewApp } from "./apps";
 import { Failure, SignedOut } from "./notices";
+import { Workspaces } from "./slack";
 import "./style.css";
 
 const queryClient = new QueryClient({
@@ -38,6 +39,10 @@ const Shell = () => {
         <Link href="/" class="brand">
           bugstack
         </Link>
+        <nav>
+          <Link href="/">Apps</Link>
+          <Link href="/slack">Slack</Link>
+        </nav>
         <span class="identity">{me.data?.email ?? (me.isPending ? "Signing in…" : "")}</span>
       </header>
       <main>
@@ -46,6 +51,7 @@ const Shell = () => {
         ) : (
           <Switch>
             <Route path="/" component={AppList} />
+            <Route path="/slack" component={Workspaces} />
             <Route path="/apps/new" component={NewApp} />
             <Route path="/apps/:appId/edit" component={EditApp} />
             <Route path="/apps/:appId" component={AppPage} />

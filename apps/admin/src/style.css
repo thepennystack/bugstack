@@ -46,6 +46,12 @@ header {
   text-decoration: none;
 }
 
+nav {
+  display: flex;
+  gap: 1rem;
+  margin-right: auto;
+}
+
 .identity {
   color: var(--muted);
   overflow-wrap: anywhere;

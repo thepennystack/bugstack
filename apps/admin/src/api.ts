@@ -70,6 +70,17 @@ export type ReportRow = {
   lastFailure: LastFailure | null;
 };
 
+export type Workspace = {
+  workspaceId: string;
+  name: string;
+  createdAt: string;
+};
+
+export type WorkspaceInput = {
+  name: string;
+  botToken: string;
+};
+
 export type Installation = {
   installationId: number;
   account: string;
@@ -149,6 +160,15 @@ const isReportRow: Guard<ReportRow> = (value): value is ReportRow =>
 
 const isInstallation: Guard<Installation> = (value): value is Installation =>
   isRecord(value) && typeof value.installationId === "number" && typeof value.account === "string";
+
+const isWorkspace: Guard<Workspace> = (value): value is Workspace =>
+  isRecord(value) &&
+  typeof value.workspaceId === "string" &&
+  typeof value.name === "string" &&
+  typeof value.createdAt === "string" &&
+  !("botToken" in value);
+
+const isEmpty: Guard<undefined> = (value): value is undefined => value === undefined;
 
 const listOf =
   <T>(guard: Guard<T>): Guard<T[]> =>
@@ -240,3 +260,18 @@ export const listInstallations = (): Promise<Installation[]> =>
 
 export const listRepos = (installationId: number): Promise<string[]> =>
   request("GET", `/api/github/installations/${installationId}/repos`, listOf(isString));
+
+export const listWorkspaces = (): Promise<Workspace[]> =>
+  request("GET", "/api/slack/workspaces", listOf(isWorkspace));
+
+export const createWorkspace = (input: WorkspaceInput): Promise<Workspace> =>
+  request("POST", "/api/slack/workspaces", isWorkspace, input);
+
+export const deleteWorkspace = (workspaceId: string): Promise<undefined> =>
+  request("DELETE", `/api/slack/workspaces/${encodeURIComponent(workspaceId)}`, isEmpty);
+
+export const setAppSlack = (appId: string, slack: Slack): Promise<undefined> =>
+  request("PUT", `/api/apps/${encodeURIComponent(appId)}/slack`, isEmpty, slack);
+
+export const removeAppSlack = (appId: string): Promise<undefined> =>
+  request("DELETE", `/api/apps/${encodeURIComponent(appId)}/slack`, isEmpty);

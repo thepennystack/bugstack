@@ -20,6 +20,7 @@ import {
   updateApp,
 } from "./api";
 import { Failure } from "./notices";
+import { AppSlack } from "./slack";
 
 const appKey = (appId: string) => ["app", appId];
 
@@ -421,6 +422,7 @@ const Reports = ({ appId }: { appId: string }) => {
           <th>Received</th>
           <th>Client</th>
           <th>Issue</th>
+          <th>Slack</th>
           <th>Last failure</th>
           <th />
         </tr>
@@ -440,6 +442,7 @@ const Reports = ({ appId }: { appId: string }) => {
                 </a>
               )}
             </td>
+            <td>{report.slackPosted ? "Posted" : ""}</td>
             <td>
               <FailureCell failure={report.lastFailure} />
             </td>
@@ -512,6 +515,8 @@ export const AppPage = () => {
         </table>
       )}
       <NewClient appId={app.appId} />
+      <h3>Slack</h3>
+      <AppSlack app={app} />
       <h3>Reports</h3>
       <Reports appId={app.appId} />
     </section>
