@@ -8,7 +8,9 @@
     "build": "vite build"
   },
   "dependencies": {
-    "preact": "^10.29.8"
+    "@tanstack/preact-query": "^5.104.5",
+    "preact": "^10.29.8",
+    "wouter-preact": "^3.13.0"
   },
   "devDependencies": {
     "@preact/preset-vite": "^2.10.6",
