@@ -27,6 +27,7 @@ const OTHER_APP = { ...SMOKE_APP, name: "bugstack-smoke-other" };
 const MAX_BODY = 60 * 1024;
 const SLACK_CHANNEL = process.env.BUGSTACK_SMOKE_SLACK_CHANNEL ?? "";
 const SLACK_OUTSIDE = process.env.BUGSTACK_SMOKE_SLACK_OUTSIDE ?? "general";
+const DUMMY_CLIENT_ID = "0000000000.0000000000";
 const commit =
   process.argv[2] ?? execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 const token = accessHeaders();
@@ -845,6 +846,96 @@ const smokeSlackHappyPath = async (origin, appId, signer, workspace) => {
   );
 };
 
+const smokeSlackApps = async (origin) => {
+  const created = await api(origin, "POST", "/api/slack/apps", {
+    name: "bugstack-smoke-dummy",
+    clientId: DUMMY_CLIENT_ID,
+    clientSecret: "smoke-dummy-secret",
+    signingSecret: "",
+  });
+  check(
+    `${origin} POST /api/slack/apps stores a Slack app without echoing its secrets`,
+    created.status === 201 &&
+      created.body.slackAppId?.length === 25 &&
+      !("clientSecret" in created.body) &&
+      !("signingSecret" in created.body),
+    `${created.status} ${JSON.stringify(created.body)}`,
+  );
+  const slackAppId = created.body.slackAppId;
+  if (typeof slackAppId !== "string") return;
+
+  const apps = await api(origin, "GET", "/api/slack/apps");
+  check(
+    `${origin} GET /api/slack/apps lists the stored Slack app without secrets`,
+    apps.status === 200 &&
+      Array.isArray(apps.body) &&
+      apps.body.some((each) => each.slackAppId === slackAppId) &&
+      apps.body.every((each) => !("clientSecret" in each) && !("signingSecret" in each)),
+    `${apps.status} ${JSON.stringify(apps.body)}`,
+  );
+
+  const refused = await api(origin, "POST", "/api/slack/apps", {
+    name: "bugstack-smoke-dummy",
+    clientId: " ",
+    clientSecret: "x",
+  });
+  check(
+    `${origin} POST /api/slack/apps refuses a blank client id with 400`,
+    refused.status === 400 && refused.body.reason === "Invalid",
+    `${refused.status} ${JSON.stringify(refused.body)}`,
+  );
+
+  const install = await fetch(`${origin}/api/slack/apps/${slackAppId}/install`, {
+    redirect: "manual",
+    headers: token,
+  });
+  const location = new URL(install.headers.get("location") ?? "about:blank");
+  const state = location.searchParams.get("state") ?? "";
+  check(
+    `${origin} GET /api/slack/apps/{id}/install answers 302 to the Slack authorize page with a state`,
+    install.status === 302 &&
+      location.origin === "https://slack.com" &&
+      location.pathname === "/oauth/v2/authorize" &&
+      location.searchParams.get("client_id") === DUMMY_CLIENT_ID &&
+      location.searchParams.get("scope") === "chat:write" &&
+      location.searchParams.get("redirect_uri") === `${origin}/api/slack/oauth/callback` &&
+      /^[0-9a-f]{32}$/.test(state),
+    `${install.status} ${location}`,
+  );
+
+  const unknown = await api(
+    origin,
+    "GET",
+    `/api/slack/oauth/callback?code=smoke&state=${randomBytes(16).toString("hex")}`,
+  );
+  check(
+    `${origin} GET /api/slack/oauth/callback with an unknown state answers 400 InvalidState`,
+    unknown.status === 400 && unknown.body.reason === "InvalidState",
+    `${unknown.status} ${JSON.stringify(unknown.body)}`,
+  );
+
+  const bogus = await api(origin, "GET", `/api/slack/oauth/callback?code=bogus&state=${state}`);
+  check(
+    `${origin} GET /api/slack/oauth/callback with a bogus code answers 400 with invalid_code`,
+    bogus.status === 400 && (bogus.body.message ?? "").includes("invalid_code"),
+    `${bogus.status} ${JSON.stringify(bogus.body)}`,
+  );
+
+  const reused = await api(origin, "GET", `/api/slack/oauth/callback?code=bogus&state=${state}`);
+  check(
+    `${origin} GET /api/slack/oauth/callback with a used state answers 400 InvalidState`,
+    reused.status === 400 && reused.body.reason === "InvalidState",
+    `${reused.status} ${JSON.stringify(reused.body)}`,
+  );
+
+  const removed = await api(origin, "DELETE", `/api/slack/apps/${slackAppId}`);
+  check(
+    `${origin} DELETE /api/slack/apps/{id} removes the dummy Slack app with 204`,
+    removed.status === 204,
+    `${removed.status} ${JSON.stringify(removed.body)}`,
+  );
+};
+
 const smokeSlack = async (origin, appId, otherAppId, signer, github) => {
   const workspaces = await api(origin, "GET", "/api/slack/workspaces");
   check(
@@ -855,36 +946,15 @@ const smokeSlack = async (origin, appId, otherAppId, signer, github) => {
     `${workspaces.status} ${JSON.stringify(workspaces.body)}`,
   );
 
-  const bogus = await api(origin, "POST", "/api/slack/workspaces", {
-    name: "bugstack-smoke-bogus",
-    botToken: ["xoxb", "smoke", "bogus"].join("-"),
-  });
-  check(
-    `${origin} POST /api/slack/workspaces refuses a bogus token with 400 and the auth.test error`,
-    bogus.status === 400 &&
-      bogus.body.reason === "Invalid" &&
-      /^Slack auth\.test refused the token: [a-z_]+$/.test(bogus.body.message ?? ""),
-    `${bogus.status} ${JSON.stringify(bogus.body)}`,
-  );
-  console.log(`     auth.test said: ${bogus.body.message}`);
-
-  for (const [label, body] of [
-    ["an empty name", { name: " ", botToken: "xoxb-1" }],
-    ["a token that is not a bot token", { name: "bugstack-smoke-bogus", botToken: "xoxp-1" }],
-  ]) {
-    const refused = await api(origin, "POST", "/api/slack/workspaces", body);
-    check(
-      `${origin} POST /api/slack/workspaces refuses ${label} with 400`,
-      refused.status === 400 && refused.body.reason === "Invalid",
-      `${refused.status} ${JSON.stringify(refused.body)}`,
-    );
-  }
+  await smokeSlackApps(origin);
 
   for (const [method, path, body] of [
     ["PUT", `/api/apps/${appId}/slack`, { workspaceId: UNKNOWN_ID, channel: "bugs" }],
     ["PUT", `/api/apps/${UNKNOWN_ID}/slack`, { workspaceId: UNKNOWN_ID, channel: "bugs" }],
     ["DELETE", `/api/apps/${UNKNOWN_ID}/slack`, undefined],
     ["DELETE", `/api/slack/workspaces/${UNKNOWN_ID}`, undefined],
+    ["DELETE", `/api/slack/apps/${UNKNOWN_ID}`, undefined],
+    ["GET", `/api/slack/apps/${UNKNOWN_ID}/install`, undefined],
   ]) {
     const missing = await api(origin, method, path, body);
     check(
@@ -946,7 +1016,7 @@ const smokePages = async (origin) => {
     /No GitHub App yet|GitHub installation/,
   );
   await visit("the GitHub Apps page", "/github", "Create GitHub App");
-  await visit("the Slack workspaces page", "/slack", "Add a workspace");
+  await visit("the Slack page", "/slack", "Create a Slack app");
   await visit(
     "the app page with its Slack section",
     `/apps/${smoked.appId}`,

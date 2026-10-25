@@ -46,7 +46,7 @@ Three one-time steps:
 
 1. Connect Workers Builds: under the Worker's Settings, Builds, set root `/`, build `npm run build && npm run build:worker` and deploy `npm run deploy`, turn non-production builds off, and give the build token D1 Edit.
 2. Open the admin GitHub page and click Create GitHub App, approve the app on GitHub, then Install it on the accounts. On each app, pick the installation and repository.
-3. Create the Slack app with the bot scope `chat:write` and install it. Paste its `xoxb-` token on the admin Slack page and `/invite @bugstack` in each channel.
+3. Open the admin Slack page and click Create a Slack app, paste its client id and secret into the form, then click Add to Slack and approve the workspace. Run `/invite @bugstack` in each channel.
 
 ## Health
 
