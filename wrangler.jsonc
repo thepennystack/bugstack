@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "bugstack",
+  "main": "crates/server/build/index.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "routes": [{ "pattern": "bugstack.kattebak.fyi", "custom_domain": true }],
+  "build": {
+    "command": "npm run build:worker"
+  },
+  "assets": {
+    "directory": "./apps/admin/dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/v1/*"]
+  },
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "bugstack",
+      "database_id": "1249cfff-c10f-4ddd-a71d-66f6ecc99432",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "ACCESS_TEAM_DOMAIN": "",
+    "ACCESS_AUD": "",
+    "ADMIN_CLIENT_ID": "",
+    "ADMIN_EMAIL": ""
+  }
+}
