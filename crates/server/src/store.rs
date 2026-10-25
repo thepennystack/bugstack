@@ -233,10 +233,20 @@ pub struct NewReport<'a> {
     pub client_id: &'a str,
     pub title: &'a str,
     pub payload: &'a str,
-    pub images: &'a [String],
+    pub images: &'a [DeclaredImage],
 }
 
-pub async fn insert_report(db: &D1Database, report: &NewReport<'_>) -> Result<String> {
+pub struct DeclaredImage {
+    pub content_type: String,
+    pub size: u64,
+}
+
+pub struct InsertedReport {
+    pub report_id: String,
+    pub image_ids: Vec<String>,
+}
+
+pub async fn insert_report(db: &D1Database, report: &NewReport<'_>) -> Result<InsertedReport> {
     let report_id = random::id()?;
     let received_at = now();
     let mut statements = vec![
@@ -254,20 +264,30 @@ pub async fn insert_report(db: &D1Database, report: &NewReport<'_>) -> Result<St
             text(report.payload),
         ])?,
     ];
-    for (position, image_id) in report.images.iter().enumerate() {
+    let mut image_ids = Vec::with_capacity(report.images.len());
+    for (position, image) in report.images.iter().enumerate() {
+        let image_id = random::id()?;
         statements.push(
             db.prepare(
-                "INSERT INTO report_image (report_id, image_id, position) VALUES (?1, ?2, ?3)",
+                "INSERT INTO image (image_id, report_id, position, content_type, size, status, \
+                 created_at) VALUES (?1, ?2, ?3, ?4, ?5, 'Reserved', ?6)",
             )
             .bind(&[
+                text(&image_id),
                 text(&report_id),
-                text(image_id),
                 JsValue::from_f64(position as f64),
+                text(&image.content_type),
+                JsValue::from_f64(image.size as f64),
+                text(&received_at),
             ])?,
         );
+        image_ids.push(image_id);
     }
     db.batch(statements).await?;
-    Ok(report_id)
+    Ok(InsertedReport {
+        report_id,
+        image_ids,
+    })
 }
 
 #[derive(Serialize)]
@@ -348,8 +368,8 @@ fn json_ids<'de, D: Deserializer<'de>>(
 const REPORT_SELECT: &str = "SELECT r.report_id, r.title, r.status, r.attempts, r.received_at, \
      c.name AS client_name, r.next_attempt_at, g.url AS issue_url, \
      (p.report_id IS NOT NULL) AS slack_posted, f.failed_at, f.step, f.message, \
-     (SELECT json_group_array(image_id) FROM (SELECT image_id FROM report_image \
-     WHERE report_id = r.report_id ORDER BY position)) AS images \
+     (SELECT json_group_array(image_id) FROM (SELECT image_id FROM image \
+     WHERE report_id = r.report_id AND status = 'Stored' ORDER BY position)) AS images \
      FROM report r \
      JOIN client c ON c.client_id = r.client_id \
      LEFT JOIN github_issue g ON g.report_id = r.report_id \
@@ -406,6 +426,8 @@ pub struct Delivery {
     pub github_installation_id: u64,
     pub github_repo: String,
     pub issue_url: Option<String>,
+    pub issue_number: Option<u64>,
+    pub image_count: Option<u32>,
     pub app_name: String,
     pub slack_channel: Option<String>,
     pub slack_token: Option<String>,
@@ -419,10 +441,10 @@ pub async fn delivery(db: &D1Database, report_id: &str) -> Result<Delivery> {
         .prepare(
             "SELECT r.title, r.payload, r.received_at, c.name AS client_name, \
              a.github_installation_id, a.github_repo, g.url AS issue_url, \
-             a.name AS app_name, s.channel AS slack_channel, w.bot_token AS slack_token, \
+             g.number AS issue_number, g.image_count, a.name AS app_name, s.channel AS slack_channel, w.bot_token AS slack_token, \
              (p.report_id IS NOT NULL) AS slack_posted, \
-             (SELECT json_group_array(image_id) FROM (SELECT image_id FROM report_image \
-             WHERE report_id = r.report_id ORDER BY position)) AS images \
+             (SELECT json_group_array(image_id) FROM (SELECT image_id FROM image \
+             WHERE report_id = r.report_id AND status = 'Stored' ORDER BY position)) AS images \
              FROM report r \
              JOIN client c ON c.client_id = r.client_id \
              JOIN app a ON a.app_id = r.app_id \
@@ -438,14 +460,22 @@ pub async fn delivery(db: &D1Database, report_id: &str) -> Result<Delivery> {
     row.ok_or_else(|| worker::Error::RustError(format!("report {report_id} vanished after claim")))
 }
 
-pub async fn insert_issue(db: &D1Database, report_id: &str, number: u64, url: &str) -> Result<()> {
+pub async fn insert_issue(
+    db: &D1Database,
+    report_id: &str,
+    number: u64,
+    url: &str,
+    image_count: usize,
+) -> Result<()> {
     db.prepare(
-        "INSERT INTO github_issue (report_id, number, url, created_at) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO github_issue (report_id, number, url, image_count, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
     )
     .bind(&[
         text(report_id),
         JsValue::from_f64(number as f64),
         text(url),
+        JsValue::from_f64(image_count as f64),
         text(&now()),
     ])?
     .run()
@@ -631,63 +661,18 @@ pub async fn insert_slack_post(db: &D1Database, report_id: &str) -> Result<()> {
 pub const STORED: &str = "Stored";
 
 #[derive(Deserialize)]
-pub struct ImageState {
-    pub image_id: String,
-    pub app_id: String,
-    pub status: String,
-    pub linked: u8,
-}
-
-pub async fn image_states(db: &D1Database, image_ids: &[String]) -> Result<Vec<ImageState>> {
-    let ids = serde_json::to_string(image_ids)?;
-    db.prepare(
-        "SELECT i.image_id, i.app_id, i.status, (l.report_id IS NOT NULL) AS linked \
-         FROM image i LEFT JOIN report_image l ON l.image_id = i.image_id \
-         WHERE i.image_id IN (SELECT value FROM json_each(?1))",
-    )
-    .bind(&[text(&ids)])?
-    .all()
-    .await?
-    .results()
-}
-
-#[derive(Deserialize)]
 pub struct Image {
+    pub report_id: String,
     pub content_type: String,
     pub size: u64,
     pub status: String,
 }
 
 pub async fn get_image(db: &D1Database, image_id: &str) -> Result<Option<Image>> {
-    db.prepare("SELECT content_type, size, status FROM image WHERE image_id = ?1")
+    db.prepare("SELECT report_id, content_type, size, status FROM image WHERE image_id = ?1")
         .bind(&[text(image_id)])?
         .first(None)
         .await
-}
-
-pub async fn reserve_image(
-    db: &D1Database,
-    app_id: &str,
-    client_id: &str,
-    content_type: &str,
-    size: u64,
-) -> Result<String> {
-    let image_id = random::id()?;
-    db.prepare(
-        "INSERT INTO image (image_id, app_id, client_id, content_type, size, status, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 'Reserved', ?6)",
-    )
-    .bind(&[
-        text(&image_id),
-        text(app_id),
-        text(client_id),
-        text(content_type),
-        JsValue::from_f64(size as f64),
-        text(&now()),
-    ])?
-    .run()
-    .await?;
-    Ok(image_id)
 }
 
 pub async fn set_image_stored(db: &D1Database, image_id: &str) -> Result<()> {
@@ -696,4 +681,38 @@ pub async fn set_image_stored(db: &D1Database, image_id: &str) -> Result<()> {
         .run()
         .await?;
     Ok(())
+}
+
+pub async fn requeue_filed(db: &D1Database, report_id: &str) -> Result<bool> {
+    let requeued: Option<Due> = db
+        .prepare(
+            "UPDATE report SET status = 'Pending', next_attempt_at = ?2 \
+             WHERE report_id = ?1 AND status = 'Filed' RETURNING report_id",
+        )
+        .bind(&[text(report_id), text(&now())])?
+        .first(None)
+        .await?;
+    Ok(requeued.is_some())
+}
+
+pub async fn set_image_count(db: &D1Database, report_id: &str, image_count: usize) -> Result<()> {
+    db.prepare("UPDATE github_issue SET image_count = ?2 WHERE report_id = ?1")
+        .bind(&[text(report_id), JsValue::from_f64(image_count as f64)])?
+        .run()
+        .await?;
+    Ok(())
+}
+
+pub async fn file_if_current(db: &D1Database, report_id: &str) -> Result<bool> {
+    let filed: Option<Due> = db
+        .prepare(
+            "UPDATE report SET status = 'Filed' WHERE report_id = ?1 AND \
+             (SELECT COUNT(*) FROM image WHERE report_id = ?1 AND status = 'Stored') <= \
+             (SELECT image_count FROM github_issue WHERE report_id = ?1) \
+             RETURNING report_id",
+        )
+        .bind(&[text(report_id)])?
+        .first(None)
+        .await?;
+    Ok(filed.is_some())
 }

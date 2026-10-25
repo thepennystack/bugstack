@@ -1,11 +1,10 @@
-use std::collections::HashSet;
-
 use serde::Serialize;
 use serde_json::Value;
 use worker::*;
 
 use crate::sign::{self, Verdict};
-use crate::store::{self, NewReport};
+use crate::store::{self, DeclaredImage, NewReport};
+use crate::uploads::{self, CONTENT_TYPES, SIZE_MAX, Upload};
 use crate::{deliver, refuse};
 
 const MAX_BODY: usize = 60 * 1024;
@@ -16,9 +15,10 @@ const IMAGES_MAX: usize = 10;
 #[serde(rename_all = "camelCase")]
 struct Accepted {
     report_id: String,
+    uploads: Vec<Upload>,
 }
 
-pub struct Signed {
+struct Signed {
     pub body: Vec<u8>,
     pub client_id: String,
 }
@@ -47,7 +47,7 @@ fn rejection(verdict: Verdict) -> Option<(&'static str, &'static str)> {
     }
 }
 
-pub async fn authenticate(
+async fn authenticate(
     req: &mut Request,
     db: &D1Database,
     app_id: &str,
@@ -103,60 +103,48 @@ fn title(report: &Value) -> std::result::Result<String, String> {
     Ok(title.to_string())
 }
 
-fn image_ids(report: &Value) -> std::result::Result<Vec<String>, String> {
+fn declared_image(image: &Value) -> std::result::Result<DeclaredImage, String> {
+    let Some(content_type) = image.get("contentType").and_then(Value::as_str) else {
+        return Err(format!(
+            "each image needs a contentType string, not {image}"
+        ));
+    };
+    if !CONTENT_TYPES.contains(&content_type) {
+        return Err(format!(
+            "image contentType must be one of {}, not {content_type:?}",
+            CONTENT_TYPES.join(", ")
+        ));
+    }
+    let Some(size) = image
+        .get("size")
+        .and_then(Value::as_u64)
+        .filter(|size| (1..=SIZE_MAX).contains(size))
+    else {
+        return Err(format!(
+            "image size must be an integer from 1 to {SIZE_MAX} bytes, not {}",
+            image.get("size").unwrap_or(&Value::Null)
+        ));
+    };
+    Ok(DeclaredImage {
+        content_type: content_type.to_string(),
+        size,
+    })
+}
+
+fn declared_images(report: &Value) -> std::result::Result<Vec<DeclaredImage>, String> {
     let Some(images) = report.get("images") else {
         return Ok(Vec::new());
     };
     let Some(images) = images.as_array() else {
-        return Err("images must be an array of image ids".into());
+        return Err("images must be an array of {contentType, size}".into());
     };
     if images.len() > IMAGES_MAX {
         return Err(format!(
-            "images holds {} ids; the limit is {IMAGES_MAX}",
+            "images declares {} images; the limit is {IMAGES_MAX}",
             images.len()
         ));
     }
-    let mut seen = HashSet::new();
-    let mut ids = Vec::with_capacity(images.len());
-    for image in images {
-        let Some(id) = image.as_str() else {
-            return Err(format!("images must hold image id strings, not {image}"));
-        };
-        if !seen.insert(id) {
-            return Err(format!("image {id} appears twice in images"));
-        }
-        ids.push(id.to_string());
-    }
-    Ok(ids)
-}
-
-async fn check_images(
-    db: &D1Database,
-    app_id: &str,
-    ids: &[String],
-) -> Result<std::result::Result<(), String>> {
-    if ids.is_empty() {
-        return Ok(Ok(()));
-    }
-    let found = store::image_states(db, ids).await?;
-    for id in ids {
-        let Some(image) = found.iter().find(|image| &image.image_id == id) else {
-            return Ok(Err(format!("image {id} does not exist")));
-        };
-        if image.app_id != app_id {
-            return Ok(Err(format!("image {id} belongs to another app")));
-        }
-        if image.status != store::STORED {
-            return Ok(Err(format!(
-                "image {id} is {}; PUT its bytes first",
-                image.status
-            )));
-        }
-        if image.linked != 0 {
-            return Ok(Err(format!("image {id} belongs to another report")));
-        }
-    }
-    Ok(Ok(()))
+    images.iter().map(declared_image).collect()
 }
 
 pub async fn handle(mut req: Request, env: &Env, ctx: &Context, app_id: &str) -> Result<Response> {
@@ -176,14 +164,15 @@ pub async fn handle(mut req: Request, env: &Env, ctx: &Context, app_id: &str) ->
         Ok(title) => title,
         Err(message) => return invalid(&message),
     };
-    let images = match image_ids(&report) {
+    let images = match declared_images(&report) {
         Ok(images) => images,
         Err(message) => return invalid(&message),
     };
-    if let Err(message) = check_images(&db, app_id, &images).await? {
-        return invalid(&message);
-    }
-    let report_id = store::insert_report(
+    let url = req.url()?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| Error::RustError(format!("{url} has no host")))?;
+    let inserted = store::insert_report(
         &db,
         &NewReport {
             app_id,
@@ -195,9 +184,10 @@ pub async fn handle(mut req: Request, env: &Env, ctx: &Context, app_id: &str) ->
     )
     .await?;
     let response = Response::from_json(&Accepted {
-        report_id: report_id.clone(),
+        report_id: inserted.report_id.clone(),
+        uploads: uploads::upload_links(env, host, inserted.image_ids)?,
     })?
     .with_status(202);
-    deliver::in_background(ctx, env, report_id);
+    deliver::in_background(ctx, env, inserted.report_id);
     Ok(response)
 }

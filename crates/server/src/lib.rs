@@ -52,17 +52,12 @@ async fn route(req: Request, env: &Env, ctx: &Context) -> Result<Response> {
     {
         return ingest::handle(req, env, ctx, app_id).await;
     }
-    if method == Method::Post
-        && let Some(app_id) = segment(path, "/v1/apps/", "/uploads")
-    {
-        return uploads::reserve(req, env, app_id).await;
-    }
     if let Some(image_id) = segment(path, "/v1/uploads/", "") {
         if method == Method::Options {
             return uploads::preflight();
         }
         if method == Method::Put {
-            return uploads::upload(req, env, image_id).await;
+            return uploads::upload(req, env, ctx, image_id).await;
         }
     }
     if method == Method::Get

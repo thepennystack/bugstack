@@ -290,3 +290,23 @@ pub async fn create_issue(
     )
     .await
 }
+
+pub async fn update_issue(
+    env: &Env,
+    installation_id: u64,
+    repo: &str,
+    number: u64,
+    body: &str,
+) -> Result<Answer<Issue>> {
+    let token = match installation_token(env, installation_id).await? {
+        Ok(token) => token,
+        Err(error) => return Ok(Err(error)),
+    };
+    call(
+        Method::Patch,
+        &format!("/repos/{repo}/issues/{number}"),
+        &format!("token {token}"),
+        Some(&json!({ "body": body })),
+    )
+    .await
+}

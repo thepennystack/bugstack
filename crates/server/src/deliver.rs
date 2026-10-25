@@ -81,13 +81,41 @@ async fn fail(
     store::set_next_attempt(db, report_id, &store::minutes_from_now(wait)).await
 }
 
+async fn refresh_issue(
+    env: &Env,
+    report_id: &str,
+    report: &Delivery,
+    url: &str,
+    number: u64,
+    image_count: u32,
+) -> Result<std::result::Result<String, String>> {
+    if report.images.len() <= image_count as usize {
+        return Ok(Ok(url.to_string()));
+    }
+    let updated = github::update_issue(
+        env,
+        report.github_installation_id,
+        &report.github_repo,
+        number,
+        &issue_body(report_id, report),
+    )
+    .await?;
+    if let Err(error) = updated {
+        return Ok(Err(error.failure()));
+    }
+    store::set_image_count(&env.d1("DB")?, report_id, report.images.len()).await?;
+    Ok(Ok(url.to_string()))
+}
+
 async fn file_issue(
     env: &Env,
     report_id: &str,
     report: &Delivery,
 ) -> Result<std::result::Result<String, String>> {
-    if let Some(url) = &report.issue_url {
-        return Ok(Ok(url.clone()));
+    if let (Some(url), Some(number), Some(image_count)) =
+        (&report.issue_url, report.issue_number, report.image_count)
+    {
+        return refresh_issue(env, report_id, report, url, number, image_count).await;
     }
     let issue = github::create_issue(
         env,
@@ -100,7 +128,14 @@ async fn file_issue(
     match issue {
         Ok(issue) => {
             let db = env.d1("DB")?;
-            store::insert_issue(&db, report_id, issue.number, &issue.html_url).await?;
+            store::insert_issue(
+                &db,
+                report_id,
+                issue.number,
+                &issue.html_url,
+                report.images.len(),
+            )
+            .await?;
             Ok(Ok(issue.html_url))
         }
         Err(error) => Ok(Err(error.failure())),
@@ -150,7 +185,10 @@ pub async fn deliver(env: &Env, report_id: &str) -> Result<()> {
     if let Err(message) = post_slack(&db, report_id, &report, &issue_url).await? {
         return fail(&db, report_id, attempts, "Slack", &message).await;
     }
-    store::set_status(&db, report_id, "Filed").await
+    if store::file_if_current(&db, report_id).await? {
+        return Ok(());
+    }
+    store::set_next_attempt(&db, report_id, &store::now()).await
 }
 
 pub async fn sweep(env: &Env) -> Result<()> {

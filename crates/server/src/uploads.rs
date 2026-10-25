@@ -1,20 +1,18 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use worker::*;
 
-use crate::ingest::{self, Signed};
 use crate::store::{self, STORED};
-use crate::{refuse, sign};
+use crate::{deliver, refuse, sign};
 
-const CONTENT_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
-const SIZE_MAX: u64 = 5 * 1024 * 1024;
+pub const CONTENT_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+pub const SIZE_MAX: u64 = 5 * 1024 * 1024;
 const UPLOAD_SECONDS: i64 = 900;
 const SIGNING_SECRET: &str = "UPLOAD_SIGNING_SECRET";
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Reserved {
+pub struct Upload {
     image_id: String,
     upload_url: String,
     expires_at: String,
@@ -32,10 +30,6 @@ struct UploadQuery {
     sig: Option<String>,
 }
 
-fn invalid(message: &str) -> Result<Response> {
-    refuse(400, "InvalidUpload", message)
-}
-
 fn signing_secret(env: &Env) -> Result<String> {
     let secret = env.secret(SIGNING_SECRET)?.to_string();
     if secret.is_empty() {
@@ -50,31 +44,6 @@ fn now_seconds() -> i64 {
     (Date::now().as_millis() / 1000) as i64
 }
 
-fn upload_request(body: &[u8]) -> std::result::Result<(String, u64), String> {
-    let Ok(request) = serde_json::from_slice::<Value>(body) else {
-        return Err("the body must be a JSON object {contentType, size}".into());
-    };
-    let Some(content_type) = request.get("contentType").and_then(Value::as_str) else {
-        return Err("contentType must be a string".into());
-    };
-    if !CONTENT_TYPES.contains(&content_type) {
-        return Err(format!(
-            "contentType must be one of {}, not {content_type:?}",
-            CONTENT_TYPES.join(", ")
-        ));
-    }
-    let Some(size) = request
-        .get("size")
-        .and_then(Value::as_u64)
-        .filter(|size| (1..=SIZE_MAX).contains(size))
-    else {
-        return Err(format!(
-            "size must be an integer from 1 to {SIZE_MAX} bytes"
-        ));
-    };
-    Ok((content_type.to_string(), size))
-}
-
 fn iso(seconds: i64) -> String {
     String::from(
         js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(seconds as f64 * 1000.0))
@@ -82,31 +51,26 @@ fn iso(seconds: i64) -> String {
     )
 }
 
-pub async fn reserve(mut req: Request, env: &Env, app_id: &str) -> Result<Response> {
-    let db = env.d1("DB")?;
-    let Signed { body, client_id } = match ingest::authenticate(&mut req, &db, app_id).await? {
-        Ok(signed) => signed,
-        Err(response) => return Ok(response),
-    };
-    let (content_type, size) = match upload_request(&body) {
-        Ok(request) => request,
-        Err(message) => return invalid(&message),
-    };
+pub fn upload_links(env: &Env, host: &str, image_ids: Vec<String>) -> Result<Vec<Upload>> {
+    if image_ids.is_empty() {
+        return Ok(Vec::new());
+    }
     let secret = signing_secret(env)?;
-    let image_id = store::reserve_image(&db, app_id, &client_id, &content_type, size).await?;
     let exp = now_seconds() + UPLOAD_SECONDS;
-    let signature = sign::upload_signature(&secret, &image_id, exp)
-        .ok_or_else(|| Error::RustError("the upload signing key does not load".into()))?;
-    let url = req.url()?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| Error::RustError(format!("{url} has no host")))?;
-    let reserved = Reserved {
-        upload_url: format!("https://{host}/v1/uploads/{image_id}?exp={exp}&sig={signature}"),
-        image_id,
-        expires_at: iso(exp),
-    };
-    Ok(Response::from_json(&reserved)?.with_status(201))
+    image_ids
+        .into_iter()
+        .map(|image_id| {
+            let signature = sign::upload_signature(&secret, &image_id, exp)
+                .ok_or_else(|| Error::RustError("the upload signing key does not load".into()))?;
+            Ok(Upload {
+                upload_url: format!(
+                    "https://{host}/v1/uploads/{image_id}?exp={exp}&sig={signature}"
+                ),
+                image_id,
+                expires_at: iso(exp),
+            })
+        })
+        .collect()
 }
 
 fn with_cors(response: Response) -> Result<Response> {
@@ -125,11 +89,16 @@ pub fn preflight() -> Result<Response> {
     with_cors(Response::empty()?.with_status(204))
 }
 
-pub async fn upload(req: Request, env: &Env, image_id: &str) -> Result<Response> {
-    with_cors(store_upload(req, env, image_id).await?)
+pub async fn upload(req: Request, env: &Env, ctx: &Context, image_id: &str) -> Result<Response> {
+    with_cors(store_upload(req, env, ctx, image_id).await?)
 }
 
-async fn store_upload(mut req: Request, env: &Env, image_id: &str) -> Result<Response> {
+async fn store_upload(
+    mut req: Request,
+    env: &Env,
+    ctx: &Context,
+    image_id: &str,
+) -> Result<Response> {
     let query: UploadQuery = req.query()?;
     let secret = signing_secret(env)?;
     let (Some(exp), Some(sig)) = (query.exp, query.sig) else {
@@ -201,6 +170,9 @@ async fn store_upload(mut req: Request, env: &Env, image_id: &str) -> Result<Res
         .execute()
         .await?;
     store::set_image_stored(&db, image_id).await?;
+    if store::requeue_filed(&db, &image.report_id).await? {
+        deliver::in_background(ctx, env, image.report_id.clone());
+    }
     Response::from_json(&Stored {
         image_id: image_id.to_string(),
     })
