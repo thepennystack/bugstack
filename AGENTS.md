@@ -34,7 +34,9 @@ Every `/api/*` request verifies the Access JWT (`Cf-Access-Jwt-Assertion`, else 
 
 Routes live in `crates/server/src/routes.rs`, D1 queries in `store.rs`, GitHub App calls in `github.rs`, Slack calls in `slack.rs`:
 
-- `GET /api/github/installations`, `GET /api/github/installations/{id}/repos`
+- `GET /api/github/apps` lists the stored GitHub Apps `[{githubAppId, appIdNumber, slug, name, ownerLogin, htmlUrl, createdAt}]`; `DELETE /api/github/apps/{githubAppId}` is 204, or 409 `InUse` while an app files through it
+- `POST /api/github/apps/state` answers 201 `{state}`, and `GET /api/github/apps/callback?code&state` finishes the manifest flow (see GitHub Apps)
+- `GET /api/github/installations` lists `[{githubAppId, installationId, account, appSlug}]` across every stored GitHub App; `GET /api/github/installations/{id}/repos?githubAppId=` lists one installation's repositories
 - `GET`/`POST /api/apps`, `GET`/`PUT /api/apps/{appId}`
 - `POST /api/apps/{appId}/clients` returns the secret once; `POST /api/clients/{clientId}/revoke`
 - `GET /api/apps/{appId}/reports` returns the newest 100 reports
@@ -42,11 +44,19 @@ Routes live in `crates/server/src/routes.rs`, D1 queries in `store.rs`, GitHub A
 - `GET`/`POST /api/slack/workspaces`: create takes `{name, botToken}`, runs Slack `auth.test` and answers 400 with its error on refusal; `DELETE /api/slack/workspaces/{workspaceId}` is 204, or 409 `InUse` while an app posts to it
 - `PUT /api/apps/{appId}/slack` `{workspaceId, channel}` and `DELETE /api/apps/{appId}/slack`, both 204; an unknown workspace is 404
 
-The API never returns a bot token.
+An app carries `githubAppId`, the empty string until one is picked; an unknown id is 404. The API never returns a bot token or a GitHub App key or secret.
 
-Bad input is 400 `Invalid`, an unknown id 404 `NotFound`. A missing GitHub secret is 503 `SecretMissing`; set both from the GitHub App settings with `echo <app id> | npm run secret -- GITHUB_APP_ID` and `openssl pkcs8 -topk8 -nocrypt -in <key>.pem | npm run secret -- GITHUB_APP_PRIVATE_KEY`. `migrations/0001_init.sql` holds the whole schema. Smoke reuses the app `bugstack-smoke` and its client `agent`; seed only through the API.
+Bad input is 400 `Invalid`, an unknown id 404 `NotFound`. A stored key that does not import is 500 `KeyInvalid`. `migrations/` holds the schema. Smoke reuses the app `bugstack-smoke` and its client `agent`; seed only through the API.
 
 The admin app keeps its response types by hand in `apps/admin/src/api.ts`. A 401 renders the signed-out notice; any other failure renders a notice with a prefilled issue link.
+
+## GitHub Apps
+
+The admin GitHub page creates a GitHub App through the manifest flow. The page asks the Worker for a state (`POST /api/github/apps/state`: 128 random bits in hex, kept in `github_app_state`, valid 15 minutes, single use), then posts a `manifest` form field to `https://github.com/settings/apps/new?state=…` or `https://github.com/organizations/{org}/settings/apps/new?state=…`. The manifest names the app `bugstack` plus an editable suffix, sets `url` to the admin origin and `redirect_url` to `{origin}/api/github/apps/callback`, is private, has the webhook off, and asks for Issues write and Metadata read.
+
+GitHub sends the browser back to the callback, which sits behind Access like every `/api/*` route. It consumes the state (400 `InvalidState` when unknown, used or expired), converts the code with `POST https://api.github.com/app-manifests/{code}/conversions`, stores a `github_app` row with the numeric app id, slug, owner, PEM key, client id and secret and webhook secret, and answers 303 to `/github?created={slug}`. A GitHub refusal answers `{reason, message}` with its status and body excerpt. GitHub hands out a PKCS#1 key; `github.rs` wraps it as PKCS#8 when it signs the app JWT.
+
+Install each app from `https://github.com/apps/{slug}/installations/new`. The app form picks `{appSlug}: {account}`, which sets both `githubAppId` and `installationId`.
 
 ## Report ingest
 
@@ -67,11 +77,11 @@ The issue body embeds each `Stored` image in `position` order as `![screenshot {
 
 ## Delivery
 
-`deliver.rs` claims a due `Pending` row (attempts plus one, a 5 minute lease), mints an installation token, opens the issue with `POST /repos/{repo}/issues`, records `github_issue`, then, when the app has a `slack_channel` row and no `slack_post`, sends `chat.postMessage` `{app}: <{issue url}|{title}>` (`&<>` escaped) with the workspace token, records `slack_post` and sets `Filed`. Slack `ok: false` or a non-2xx is a `Slack` failure with the same backoff; the next attempt reuses the filed issue. A GitHub non-2xx, network error or missing secret writes a `failure` row (`"{status} {first 500 chars}"`, `SecretMissing {name}`) and moves `next_attempt_at` by 1, 5, 30, 120, 720 minutes; the sixth failed attempt sets `Failed`. A D1 error propagates and the lease expiry hands the row to cron. The cron trigger (`* * * * *`) delivers up to 10 due rows, oldest first. Retry sets `Pending`, attempts 0 and runs `deliver` in the background. Smoke checks the `SecretMissing` path until the GitHub secrets are set, then files and closes a real issue with `gh`.
+`deliver.rs` claims a due `Pending` row (attempts plus one, a 5 minute lease), mints an installation token with the key of the app's GitHub App, opens the issue with `POST /repos/{repo}/issues`, records `github_issue`, then, when the app has a `slack_channel` row and no `slack_post`, sends `chat.postMessage` `{app}: <{issue url}|{title}>` (`&<>` escaped) with the workspace token, records `slack_post` and sets `Filed`. Slack `ok: false` or a non-2xx is a `Slack` failure with the same backoff; the next attempt reuses the filed issue. A GitHub non-2xx, network error, invalid key or missing GitHub App writes a `GitHub` `failure` row (`"{status} {first 500 chars}"`, `KeyInvalid …`, `NoGitHubApp …`) and moves `next_attempt_at` by 1, 5, 30, 120, 720 minutes; the sixth failed attempt sets `Failed`. A D1 error propagates and the lease expiry hands the row to cron. The cron trigger (`* * * * *`) delivers up to 10 due rows, oldest first. Retry sets `Pending`, attempts 0 and runs `deliver` in the background. Smoke checks the state and callback routes, and the `NoGitHubApp` path until a stored GitHub App is installed on `thepennystack`; then it points `bugstack-smoke` at that installation, files and closes a real issue with `gh`.
 
 ## Slack
 
-Create a Slack app with the bot scope `chat:write` and install it in the workspace. Paste its `xoxb-` token on the admin Slack page, then `/invite @bugstack` in each channel an app posts to; a channel without the bot records `not_in_channel`. Smoke runs the Slack happy path only when a workspace exists, the GitHub secrets are set and `BUGSTACK_SMOKE_SLACK_CHANNEL` names a channel with the bot; `BUGSTACK_SMOKE_SLACK_OUTSIDE` (default `general`) names one without it.
+Create a Slack app with the bot scope `chat:write` and install it in the workspace. Paste its `xoxb-` token on the admin Slack page, then `/invite @bugstack` in each channel an app posts to; a channel without the bot records `not_in_channel`. Smoke runs the Slack happy path only when a workspace exists, a stored GitHub App is installed on the smoke repository owner and `BUGSTACK_SMOKE_SLACK_CHANNEL` names a channel with the bot; `BUGSTACK_SMOKE_SLACK_OUTSIDE` (default `general`) names one without it.
 
 ## Infra
 
