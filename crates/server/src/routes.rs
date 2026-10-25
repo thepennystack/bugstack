@@ -3,8 +3,9 @@ use serde_json::Value;
 use worker::*;
 
 use crate::admin::{ApiRequest, Me};
-use crate::github::{self, Credentials, GitHubError};
-use crate::store::{self, AppInput, Client, ClientRemoval, GitHubAppKey, NewGitHubApp, Removal};
+use crate::fixtures;
+use crate::github::{self, GitHubError};
+use crate::store::{self, AppInput, Client, ClientRemoval};
 use crate::{deliver, refuse, slack_routes, slack_store};
 
 const NAME_MAX: usize = 80;
@@ -13,8 +14,7 @@ const OWNER_MAX: usize = 39;
 const REPO_MAX: usize = 100;
 const CHANNEL_MAX: usize = 80;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
-const STATE_MINUTES: u32 = 15;
-const CODE_MAX: usize = 100;
+const INSTALL_BASE: &str = "https://github.com/apps";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,15 +26,15 @@ struct AppDetail {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct InstallationRow {
-    github_app_id: String,
     installation_id: u64,
     account: String,
-    app_slug: String,
 }
 
 #[derive(Serialize)]
-struct IssuedState {
-    state: String,
+#[serde(rename_all = "camelCase")]
+struct GitHubAppInfo {
+    slug: String,
+    install_url: String,
 }
 
 #[derive(Serialize)]
@@ -119,7 +119,6 @@ fn app_input(body: &Value) -> Checked<AppInput> {
     Ok(AppInput {
         name: text_field(body, "name", 1, NAME_MAX)?,
         description: text_field(body, "description", 0, DESCRIPTION_MAX)?,
-        github_app_id: text_field(body, "githubAppId", 0, NAME_MAX)?,
         installation_id: installation_id(body)?,
         github_repo: github_repo(body)?,
     })
@@ -154,130 +153,51 @@ pub(crate) fn created<T: Serialize>(value: &T) -> Result<Response> {
     Ok(Response::from_json(value)?.with_status(201))
 }
 
-fn credentials(key: &GitHubAppKey) -> Credentials<'_> {
-    Credentials {
-        app_id_number: key.app_id_number,
-        private_key: &key.private_key,
-    }
+fn github_app(env: &Env) -> Result<Response> {
+    let slug = match fixtures::github_slug(env) {
+        Ok(slug) => slug,
+        Err(missing) => return missing.response(),
+    };
+    let install_url = format!(
+        "{INSTALL_BASE}/{}/installations/new",
+        js_sys::encode_uri_component(&slug)
+    );
+    Response::from_json(&GitHubAppInfo { slug, install_url })
 }
 
-async fn installations(db: &D1Database) -> Result<Response> {
-    let mut rows = Vec::new();
-    for key in store::github_app_keys(db).await? {
-        let all = match github::installations(&credentials(&key)).await? {
-            Ok(all) => all,
-            Err(error) => return github_failure(error),
-        };
-        rows.extend(all.into_iter().map(|installation| InstallationRow {
-            github_app_id: key.github_app_id.clone(),
+async fn installations(env: &Env) -> Result<Response> {
+    let fixture = match fixtures::github(env) {
+        Ok(fixture) => fixture,
+        Err(missing) => return missing.response(),
+    };
+    let all = match github::installations(&fixture.credentials()).await? {
+        Ok(all) => all,
+        Err(error) => return github_failure(error),
+    };
+    let rows: Vec<InstallationRow> = all
+        .into_iter()
+        .map(|installation| InstallationRow {
             installation_id: installation.installation_id,
             account: installation.account,
-            app_slug: key.slug.clone(),
-        }));
-    }
+        })
+        .collect();
     Response::from_json(&rows)
 }
 
-async fn repos(db: &D1Database, request: &ApiRequest, id: &str) -> Result<Response> {
+async fn repos(env: &Env, id: &str) -> Result<Response> {
     let Some(installation_id) = id.parse::<u64>().ok().filter(|id| *id <= MAX_SAFE_INTEGER) else {
         return invalid(&format!(
             "installation id must be a non-negative integer, not {id:?}"
         ));
     };
-    let Some(github_app_id) = request.param("githubAppId").filter(|id| !id.is_empty()) else {
-        return invalid("githubAppId must name the GitHub App of the installation");
+    let fixture = match fixtures::github(env) {
+        Ok(fixture) => fixture,
+        Err(missing) => return missing.response(),
     };
-    let Some(key) = store::github_app_key(db, github_app_id).await? else {
-        return not_found("GitHub App", github_app_id);
-    };
-    match github::repos(&credentials(&key), installation_id).await? {
+    match github::repos(&fixture.credentials(), installation_id).await? {
         Ok(all) => Response::from_json(&all),
         Err(error) => github_failure(error),
     }
-}
-
-async fn issue_state(db: &D1Database) -> Result<Response> {
-    let state = hex::encode(crate::random::bytes(16)?);
-    store::issue_github_app_state(db, &state, &store::minutes_ago(STATE_MINUTES)).await?;
-    created(&IssuedState { state })
-}
-
-fn valid_code(code: &str) -> bool {
-    !code.is_empty()
-        && code.len() <= CODE_MAX
-        && code
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
-async fn callback(db: &D1Database, request: &ApiRequest) -> Result<Response> {
-    let state = request.param("state").unwrap_or("");
-    let consumed = !state.is_empty()
-        && store::consume_github_app_state(db, state, &store::minutes_ago(STATE_MINUTES)).await?;
-    if !consumed {
-        return refuse(
-            400,
-            "InvalidState",
-            "the state is unknown, used or older than 15 minutes; create the GitHub App again",
-        );
-    }
-    let code = request.param("code").unwrap_or("");
-    if !valid_code(code) {
-        return invalid(&format!(
-            "code must be the GitHub manifest code, not {code:?}"
-        ));
-    }
-    let conversion = match github::convert_manifest(code).await? {
-        Ok(conversion) => conversion,
-        Err(error) => return github_failure(error),
-    };
-    store::insert_github_app(
-        db,
-        &NewGitHubApp {
-            app_id_number: conversion.id,
-            slug: &conversion.slug,
-            name: &conversion.name,
-            owner_login: &conversion.owner.login,
-            private_key: &conversion.pem,
-            client_id: &conversion.client_id,
-            client_secret: &conversion.client_secret,
-            webhook_secret: conversion.webhook_secret.as_deref().unwrap_or(""),
-            html_url: &conversion.html_url,
-        },
-    )
-    .await?;
-    let headers = Headers::new();
-    headers.set(
-        "Location",
-        &format!(
-            "/github?created={}",
-            js_sys::encode_uri_component(&conversion.slug)
-        ),
-    )?;
-    Ok(Response::empty()?.with_status(303).with_headers(headers))
-}
-
-async fn delete_github_app(db: &D1Database, github_app_id: &str) -> Result<Response> {
-    match store::delete_github_app(db, github_app_id).await? {
-        Removal::Removed => no_content(),
-        Removal::Missing => not_found("GitHub App", github_app_id),
-        Removal::InUse(count) => refuse(
-            409,
-            "InUse",
-            &format!(
-                "{count} app(s) file issues through this GitHub App; point them elsewhere first"
-            ),
-        ),
-    }
-}
-
-async fn known_github_app(db: &D1Database, input: &AppInput) -> Result<bool> {
-    if input.github_app_id.is_empty() {
-        return Ok(true);
-    }
-    Ok(store::get_github_app(db, &input.github_app_id)
-        .await?
-        .is_some())
 }
 
 async fn create_app(db: &D1Database, body: &Value) -> Result<Response> {
@@ -285,9 +205,6 @@ async fn create_app(db: &D1Database, body: &Value) -> Result<Response> {
         Ok(input) => input,
         Err(message) => return invalid(&message),
     };
-    if !known_github_app(db, &input).await? {
-        return not_found("GitHub App", &input.github_app_id);
-    }
     created(&store::create_app(db, &input).await?)
 }
 
@@ -304,9 +221,6 @@ async fn put_app(db: &D1Database, app_id: &str, body: &Value) -> Result<Response
         Ok(input) => input,
         Err(message) => return invalid(&message),
     };
-    if !known_github_app(db, &input).await? {
-        return not_found("GitHub App", &input.github_app_id);
-    }
     match store::update_app(db, app_id, &input).await? {
         Some(app) => Response::from_json(&app),
         None => not_found("app", app_id),
@@ -434,18 +348,9 @@ pub async fn route(request: ApiRequest, env: &Env, ctx: &Context) -> Result<Resp
         (Method::Get, ["me"]) => Response::from_json(&Me {
             email: request.admin.clone(),
         }),
-        (Method::Get, ["github", "apps"]) => {
-            Response::from_json(&store::list_github_apps(&env.d1("DB")?).await?)
-        }
-        (Method::Post, ["github", "apps", "state"]) => issue_state(&env.d1("DB")?).await,
-        (Method::Get, ["github", "apps", "callback"]) => callback(&env.d1("DB")?, &request).await,
-        (Method::Delete, ["github", "apps", github_app_id]) => {
-            delete_github_app(&env.d1("DB")?, github_app_id).await
-        }
-        (Method::Get, ["github", "installations"]) => installations(&env.d1("DB")?).await,
-        (Method::Get, ["github", "installations", id, "repos"]) => {
-            repos(&env.d1("DB")?, &request, id).await
-        }
+        (Method::Get, ["github", "app"]) => github_app(env),
+        (Method::Get, ["github", "installations"]) => installations(env).await,
+        (Method::Get, ["github", "installations", id, "repos"]) => repos(env, id).await,
         (Method::Get, ["apps"]) => Response::from_json(&store::list_apps(&env.d1("DB")?).await?),
         (Method::Post, ["apps"]) => create_app(&env.d1("DB")?, body).await,
         (Method::Get, ["apps", app_id]) => get_app(&env.d1("DB")?, app_id).await,

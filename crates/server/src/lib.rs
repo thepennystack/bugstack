@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod auth;
 pub mod deliver;
+pub mod fixtures;
 pub mod github;
 pub mod ingest;
 pub mod random;

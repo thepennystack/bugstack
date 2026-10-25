@@ -67,19 +67,6 @@ pub struct Account {
 }
 
 #[derive(Deserialize)]
-pub struct Conversion {
-    pub id: u64,
-    pub slug: String,
-    pub name: String,
-    pub owner: Account,
-    pub pem: String,
-    pub client_id: String,
-    pub client_secret: String,
-    pub webhook_secret: Option<String>,
-    pub html_url: String,
-}
-
-#[derive(Deserialize)]
 struct InstallationToken {
     token: String,
 }
@@ -248,16 +235,6 @@ async fn call<T: DeserializeOwned>(
             "GitHub {method} {path} answered an unexpected body: {error}"
         )))),
     }
-}
-
-pub async fn convert_manifest(code: &str) -> Result<Answer<Conversion>> {
-    call(
-        Method::Post,
-        &format!("/app-manifests/{code}/conversions"),
-        None,
-        None,
-    )
-    .await
 }
 
 pub async fn installations(credentials: &Credentials<'_>) -> Result<Answer<Vec<Installation>>> {
