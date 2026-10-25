@@ -20,6 +20,16 @@ pub struct ApiRequest {
     pub path: String,
     pub admin: String,
     pub body: Value,
+    pub query: Vec<(String, String)>,
+}
+
+impl ApiRequest {
+    pub fn param(&self, name: &str) -> Option<&str> {
+        self.query
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
 }
 
 #[derive(Serialize)]
@@ -163,12 +173,17 @@ pub async fn handle(mut req: Request, env: &Env, ctx: &Context) -> Result<Respon
         Ok(body) => body,
         Err(response) => return Ok(response),
     };
+    let url = req.url()?;
     routes::route(
         ApiRequest {
             method: req.method(),
-            path: req.url()?.path().to_string(),
+            path: url.path().to_string(),
             admin,
             body,
+            query: url
+                .query_pairs()
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect(),
         },
         env,
         ctx,

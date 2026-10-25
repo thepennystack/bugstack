@@ -5,8 +5,8 @@ use worker::{D1Database, Result};
 use crate::random;
 use crate::sign::SigningClient;
 
-const APP_SELECT: &str = "SELECT a.app_id, a.name, a.description, a.github_installation_id, \
-     a.github_repo, a.created_at, s.workspace_id, s.channel \
+const APP_SELECT: &str = "SELECT a.app_id, a.name, a.description, a.github_app_id, \
+     a.github_installation_id, a.github_repo, a.created_at, s.workspace_id, s.channel \
      FROM app a LEFT JOIN slack_channel s ON s.app_id = a.app_id";
 
 const CLIENT_SELECT: &str = "SELECT client_id, name, status, created_at FROM client";
@@ -24,6 +24,7 @@ pub struct App {
     pub app_id: String,
     pub name: String,
     pub description: String,
+    pub github_app_id: String,
     pub installation_id: u64,
     pub github_repo: String,
     pub slack: Option<Slack>,
@@ -35,6 +36,7 @@ struct AppRow {
     app_id: String,
     name: String,
     description: String,
+    github_app_id: String,
     github_installation_id: u64,
     github_repo: String,
     created_at: String,
@@ -55,6 +57,7 @@ impl From<AppRow> for App {
             app_id: row.app_id,
             name: row.name,
             description: row.description,
+            github_app_id: row.github_app_id,
             installation_id: row.github_installation_id,
             github_repo: row.github_repo,
             slack,
@@ -94,6 +97,7 @@ impl From<ClientRow> for Client {
 pub struct AppInput {
     pub name: String,
     pub description: String,
+    pub github_app_id: String,
     pub installation_id: u64,
     pub github_repo: String,
 }
@@ -133,7 +137,7 @@ pub async fn create_app(db: &D1Database, input: &AppInput) -> Result<App> {
     let app_id = random::id()?;
     db.prepare(
         "INSERT INTO app (app_id, name, description, github_installation_id, github_repo, \
-         created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+         created_at, github_app_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )
     .bind(&[
         text(&app_id),
@@ -142,6 +146,7 @@ pub async fn create_app(db: &D1Database, input: &AppInput) -> Result<App> {
         JsValue::from_f64(input.installation_id as f64),
         text(&input.github_repo),
         text(&now()),
+        text(&input.github_app_id),
     ])?
     .run()
     .await?;
@@ -153,7 +158,7 @@ pub async fn create_app(db: &D1Database, input: &AppInput) -> Result<App> {
 pub async fn update_app(db: &D1Database, app_id: &str, input: &AppInput) -> Result<Option<App>> {
     db.prepare(
         "UPDATE app SET name = ?2, description = ?3, github_installation_id = ?4, \
-         github_repo = ?5 WHERE app_id = ?1",
+         github_repo = ?5, github_app_id = ?6 WHERE app_id = ?1",
     )
     .bind(&[
         text(app_id),
@@ -161,6 +166,7 @@ pub async fn update_app(db: &D1Database, app_id: &str, input: &AppInput) -> Resu
         text(&input.description),
         JsValue::from_f64(input.installation_id as f64),
         text(&input.github_repo),
+        text(&input.github_app_id),
     ])?
     .run()
     .await?;
@@ -425,6 +431,8 @@ pub struct Delivery {
     pub client_name: String,
     pub github_installation_id: u64,
     pub github_repo: String,
+    pub github_app_number: Option<u64>,
+    pub github_private_key: Option<String>,
     pub issue_url: Option<String>,
     pub issue_number: Option<u64>,
     pub image_count: Option<u32>,
@@ -440,7 +448,8 @@ pub async fn delivery(db: &D1Database, report_id: &str) -> Result<Delivery> {
     let row: Option<Delivery> = db
         .prepare(
             "SELECT r.title, r.payload, r.received_at, c.name AS client_name, \
-             a.github_installation_id, a.github_repo, g.url AS issue_url, \
+             a.github_installation_id, a.github_repo, h.app_id_number AS github_app_number, \
+             h.private_key AS github_private_key, g.url AS issue_url, \
              g.number AS issue_number, g.image_count, a.name AS app_name, s.channel AS slack_channel, w.bot_token AS slack_token, \
              (p.report_id IS NOT NULL) AS slack_posted, \
              (SELECT json_group_array(image_id) FROM (SELECT image_id FROM image \
@@ -448,6 +457,7 @@ pub async fn delivery(db: &D1Database, report_id: &str) -> Result<Delivery> {
              FROM report r \
              JOIN client c ON c.client_id = r.client_id \
              JOIN app a ON a.app_id = r.app_id \
+             LEFT JOIN github_app h ON h.github_app_id = a.github_app_id \
              LEFT JOIN github_issue g ON g.report_id = r.report_id \
              LEFT JOIN slack_channel s ON s.app_id = r.app_id \
              LEFT JOIN slack_workspace w ON w.workspace_id = s.workspace_id \
@@ -715,4 +725,154 @@ pub async fn file_if_current(db: &D1Database, report_id: &str) -> Result<bool> {
         .first(None)
         .await?;
     Ok(filed.is_some())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubApp {
+    #[serde(alias = "github_app_id")]
+    pub github_app_id: String,
+    #[serde(alias = "app_id_number")]
+    pub app_id_number: u64,
+    pub slug: String,
+    pub name: String,
+    #[serde(alias = "owner_login")]
+    pub owner_login: String,
+    #[serde(alias = "html_url")]
+    pub html_url: String,
+    #[serde(alias = "created_at")]
+    pub created_at: String,
+}
+
+#[derive(Deserialize)]
+pub struct GitHubAppKey {
+    pub github_app_id: String,
+    pub app_id_number: u64,
+    pub slug: String,
+    pub private_key: String,
+}
+
+pub struct NewGitHubApp<'a> {
+    pub app_id_number: u64,
+    pub slug: &'a str,
+    pub name: &'a str,
+    pub owner_login: &'a str,
+    pub private_key: &'a str,
+    pub client_id: &'a str,
+    pub client_secret: &'a str,
+    pub webhook_secret: &'a str,
+    pub html_url: &'a str,
+}
+
+const GITHUB_APP_SELECT: &str = "SELECT github_app_id, app_id_number, slug, name, owner_login, \
+     html_url, created_at FROM github_app";
+
+const GITHUB_APP_KEY_SELECT: &str =
+    "SELECT github_app_id, app_id_number, slug, private_key FROM github_app";
+
+pub async fn list_github_apps(db: &D1Database) -> Result<Vec<GitHubApp>> {
+    db.prepare(format!(
+        "{GITHUB_APP_SELECT} ORDER BY created_at, github_app_id"
+    ))
+    .all()
+    .await?
+    .results()
+}
+
+pub async fn get_github_app(db: &D1Database, github_app_id: &str) -> Result<Option<GitHubApp>> {
+    db.prepare(format!("{GITHUB_APP_SELECT} WHERE github_app_id = ?1"))
+        .bind(&[text(github_app_id)])?
+        .first(None)
+        .await
+}
+
+pub async fn github_app_keys(db: &D1Database) -> Result<Vec<GitHubAppKey>> {
+    db.prepare(format!(
+        "{GITHUB_APP_KEY_SELECT} ORDER BY created_at, github_app_id"
+    ))
+    .all()
+    .await?
+    .results()
+}
+
+pub async fn github_app_key(db: &D1Database, github_app_id: &str) -> Result<Option<GitHubAppKey>> {
+    db.prepare(format!("{GITHUB_APP_KEY_SELECT} WHERE github_app_id = ?1"))
+        .bind(&[text(github_app_id)])?
+        .first(None)
+        .await
+}
+
+pub async fn insert_github_app(db: &D1Database, app: &NewGitHubApp<'_>) -> Result<String> {
+    let github_app_id = random::id()?;
+    db.prepare(
+        "INSERT INTO github_app (github_app_id, app_id_number, slug, name, owner_login, \
+         private_key, client_id, client_secret, webhook_secret, html_url, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+    )
+    .bind(&[
+        text(&github_app_id),
+        JsValue::from_f64(app.app_id_number as f64),
+        text(app.slug),
+        text(app.name),
+        text(app.owner_login),
+        text(app.private_key),
+        text(app.client_id),
+        text(app.client_secret),
+        text(app.webhook_secret),
+        text(app.html_url),
+        text(&now()),
+    ])?
+    .run()
+    .await?;
+    Ok(github_app_id)
+}
+
+pub async fn delete_github_app(db: &D1Database, github_app_id: &str) -> Result<Removal> {
+    if get_github_app(db, github_app_id).await?.is_none() {
+        return Ok(Removal::Missing);
+    }
+    let used: Option<Count> = db
+        .prepare("SELECT COUNT(*) AS count FROM app WHERE github_app_id = ?1")
+        .bind(&[text(github_app_id)])?
+        .first(None)
+        .await?;
+    let count = used.map_or(0, |used| used.count);
+    if count > 0 {
+        return Ok(Removal::InUse(count));
+    }
+    db.prepare("DELETE FROM github_app WHERE github_app_id = ?1")
+        .bind(&[text(github_app_id)])?
+        .run()
+        .await?;
+    Ok(Removal::Removed)
+}
+
+pub fn minutes_ago(minutes: u32) -> String {
+    let at = js_sys::Date::now() - f64::from(minutes) * 60_000.0;
+    String::from(js_sys::Date::new(&JsValue::from_f64(at)).to_iso_string())
+}
+
+pub async fn issue_github_app_state(db: &D1Database, state: &str, expired: &str) -> Result<()> {
+    db.batch(vec![
+        db.prepare("DELETE FROM github_app_state WHERE created_at < ?1")
+            .bind(&[text(expired)])?,
+        db.prepare("INSERT INTO github_app_state (state, created_at) VALUES (?1, ?2)")
+            .bind(&[text(state), text(&now())])?,
+    ])
+    .await?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct StateRow {
+    created_at: String,
+}
+
+pub async fn consume_github_app_state(db: &D1Database, state: &str, expired: &str) -> Result<bool> {
+    let consumed: Option<StateRow> = db
+        .prepare("DELETE FROM github_app_state WHERE state = ?1 RETURNING created_at")
+        .bind(&[text(state)])?
+        .first(None)
+        .await?;
+    Ok(consumed.is_some_and(|row| row.created_at.as_str() >= expired))
 }

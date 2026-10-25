@@ -2,21 +2,23 @@ use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use js_sys::futures::JsFuture;
 use js_sys::{Array, Object, Reflect, Uint8Array};
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use wasm_bindgen::{JsCast, JsValue};
 use worker::*;
 
 const API: &str = "https://api.github.com";
-const APP_ID: &str = "GITHUB_APP_ID";
-const PRIVATE_KEY: &str = "GITHUB_APP_PRIVATE_KEY";
 const ALGORITHM: &str = "RSASSA-PKCS1-v1_5";
 const BODY_EXCERPT: usize = 500;
+const PKCS1_HEADER: &str = "BEGIN RSA PRIVATE KEY";
+const PKCS8_PREFIX: [u8; 18] = [
+    0x02, 0x01, 0x00, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
+    0x05, 0x00,
+];
 
 pub enum GitHubError {
-    SecretMissing(&'static str),
-    SecretInvalid(String),
+    KeyInvalid(String),
     Answered {
         request: String,
         status: u16,
@@ -28,8 +30,7 @@ pub enum GitHubError {
 impl GitHubError {
     pub fn failure(&self) -> String {
         match self {
-            GitHubError::SecretMissing(name) => format!("SecretMissing {name}"),
-            GitHubError::SecretInvalid(message) => format!("SecretInvalid {message}"),
+            GitHubError::KeyInvalid(message) => format!("KeyInvalid {message}"),
             GitHubError::Answered {
                 status, excerpt, ..
             } => format!("{status} {excerpt}"),
@@ -38,14 +39,17 @@ impl GitHubError {
     }
 }
 
+pub struct Credentials<'a> {
+    pub app_id_number: u64,
+    pub private_key: &'a str,
+}
+
 #[derive(Deserialize)]
 pub struct Issue {
     pub number: u64,
     pub html_url: String,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct Installation {
     pub installation_id: u64,
     pub account: String,
@@ -58,8 +62,21 @@ struct RawInstallation {
 }
 
 #[derive(Deserialize)]
-struct Account {
-    login: String,
+pub struct Account {
+    pub login: String,
+}
+
+#[derive(Deserialize)]
+pub struct Conversion {
+    pub id: u64,
+    pub slug: String,
+    pub name: String,
+    pub owner: Account,
+    pub pem: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub webhook_secret: Option<String>,
+    pub html_url: String,
 }
 
 #[derive(Deserialize)]
@@ -79,19 +96,35 @@ struct Repository {
 
 type Answer<T> = std::result::Result<T, GitHubError>;
 
-fn secret(env: &Env, name: &'static str) -> Answer<String> {
-    let Ok(value) = env.secret(name) else {
-        return Err(GitHubError::SecretMissing(name));
-    };
-    let value = value.to_string().trim().to_string();
-    if value.is_empty() {
-        return Err(GitHubError::SecretMissing(name));
-    }
-    Ok(value)
-}
-
 fn js_error(what: &str, error: JsValue) -> Error {
     Error::RustError(format!("{what} failed: {error:?}"))
+}
+
+fn der_length(len: usize) -> Vec<u8> {
+    if len < 0x80 {
+        return vec![len as u8];
+    }
+    let bytes: Vec<u8> = len
+        .to_be_bytes()
+        .into_iter()
+        .skip_while(|byte| *byte == 0)
+        .collect();
+    let mut out = vec![0x80 | bytes.len() as u8];
+    out.extend(bytes);
+    out
+}
+
+fn der(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    out.extend(der_length(content.len()));
+    out.extend_from_slice(content);
+    out
+}
+
+fn pkcs1_to_pkcs8(pkcs1: &[u8]) -> Vec<u8> {
+    let mut info = PKCS8_PREFIX.to_vec();
+    info.extend(der(0x04, pkcs1));
+    der(0x30, &info)
 }
 
 fn pkcs8(pem: &str) -> Answer<Vec<u8>> {
@@ -100,14 +133,13 @@ fn pkcs8(pem: &str) -> Answer<Vec<u8>> {
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with("-----"))
         .collect();
-    if pem.contains("BEGIN RSA PRIVATE KEY") {
-        return Err(GitHubError::SecretInvalid(format!(
-            "{PRIVATE_KEY} is a PKCS#1 key; convert it with openssl pkcs8 -topk8 -nocrypt"
-        )));
+    let decoded = STANDARD.decode(body).map_err(|error| {
+        GitHubError::KeyInvalid(format!("the stored private key is not PEM: {error}"))
+    })?;
+    if pem.contains(PKCS1_HEADER) {
+        return Ok(pkcs1_to_pkcs8(&decoded));
     }
-    STANDARD
-        .decode(body)
-        .map_err(|error| GitHubError::SecretInvalid(format!("{PRIVATE_KEY} is not PEM: {error}")))
+    Ok(decoded)
 }
 
 fn algorithm() -> Result<Object> {
@@ -127,7 +159,11 @@ async fn sign(der: &[u8], message: &[u8]) -> Result<std::result::Result<Vec<u8>,
         .map_err(|error| js_error("crypto.subtle.importKey", error))?;
     let key: web_sys::CryptoKey = match JsFuture::from(import).await {
         Ok(key) => key.unchecked_into(),
-        Err(error) => return Ok(Err(format!("{PRIVATE_KEY} does not import: {error:?}"))),
+        Err(error) => {
+            return Ok(Err(format!(
+                "the stored private key does not import: {error:?}"
+            )));
+        }
     };
     let signing = subtle
         .sign_with_str_and_u8_array(ALGORITHM, &key, message)
@@ -138,23 +174,21 @@ async fn sign(der: &[u8], message: &[u8]) -> Result<std::result::Result<Vec<u8>,
     Ok(Ok(Uint8Array::new(&signature).to_vec()))
 }
 
-async fn app_jwt(env: &Env) -> Result<Answer<String>> {
-    let app_id = match secret(env, APP_ID) {
-        Ok(value) => value,
-        Err(error) => return Ok(Err(error)),
-    };
-    let der = match secret(env, PRIVATE_KEY).and_then(|pem| pkcs8(&pem)) {
+async fn app_jwt(credentials: &Credentials<'_>) -> Result<Answer<String>> {
+    let der = match pkcs8(credentials.private_key) {
         Ok(der) => der,
         Err(error) => return Ok(Err(error)),
     };
     let now = Date::now().as_millis() / 1000;
     let header = URL_SAFE_NO_PAD.encode(json!({ "alg": "RS256", "typ": "JWT" }).to_string());
-    let claims = URL_SAFE_NO_PAD
-        .encode(json!({ "iat": now - 60, "exp": now + 540, "iss": app_id }).to_string());
+    let claims = URL_SAFE_NO_PAD.encode(
+        json!({ "iat": now - 60, "exp": now + 540, "iss": credentials.app_id_number.to_string() })
+            .to_string(),
+    );
     let signed = format!("{header}.{claims}");
     let signature = match sign(&der, signed.as_bytes()).await? {
         Ok(signature) => signature,
-        Err(message) => return Ok(Err(GitHubError::SecretInvalid(message))),
+        Err(message) => return Ok(Err(GitHubError::KeyInvalid(message))),
     };
     Ok(Ok(format!(
         "{signed}.{}",
@@ -165,14 +199,16 @@ async fn app_jwt(env: &Env) -> Result<Answer<String>> {
 async fn call<T: DeserializeOwned>(
     method: Method,
     path: &str,
-    authorization: &str,
+    authorization: Option<&str>,
     body: Option<&Value>,
 ) -> Result<Answer<T>> {
     let headers = Headers::new();
     headers.set("Accept", "application/vnd.github+json")?;
     headers.set("X-GitHub-Api-Version", "2022-11-28")?;
     headers.set("User-Agent", "bugstack")?;
-    headers.set("Authorization", authorization)?;
+    if let Some(authorization) = authorization {
+        headers.set("Authorization", authorization)?;
+    }
     if body.is_some() {
         headers.set("Content-Type", "application/json")?;
     }
@@ -214,15 +250,25 @@ async fn call<T: DeserializeOwned>(
     }
 }
 
-pub async fn installations(env: &Env) -> Result<Answer<Vec<Installation>>> {
-    let jwt = match app_jwt(env).await? {
+pub async fn convert_manifest(code: &str) -> Result<Answer<Conversion>> {
+    call(
+        Method::Post,
+        &format!("/app-manifests/{code}/conversions"),
+        None,
+        None,
+    )
+    .await
+}
+
+pub async fn installations(credentials: &Credentials<'_>) -> Result<Answer<Vec<Installation>>> {
+    let jwt = match app_jwt(credentials).await? {
         Ok(jwt) => jwt,
         Err(error) => return Ok(Err(error)),
     };
     let raw: Answer<Vec<RawInstallation>> = call(
         Method::Get,
         "/app/installations?per_page=100",
-        &format!("Bearer {jwt}"),
+        Some(&format!("Bearer {jwt}")),
         None,
     )
     .await?;
@@ -236,30 +282,36 @@ pub async fn installations(env: &Env) -> Result<Answer<Vec<Installation>>> {
     }))
 }
 
-pub async fn installation_token(env: &Env, installation_id: u64) -> Result<Answer<String>> {
-    let jwt = match app_jwt(env).await? {
+pub async fn installation_token(
+    credentials: &Credentials<'_>,
+    installation_id: u64,
+) -> Result<Answer<String>> {
+    let jwt = match app_jwt(credentials).await? {
         Ok(jwt) => jwt,
         Err(error) => return Ok(Err(error)),
     };
     let token: Answer<InstallationToken> = call(
         Method::Post,
         &format!("/app/installations/{installation_id}/access_tokens"),
-        &format!("Bearer {jwt}"),
+        Some(&format!("Bearer {jwt}")),
         None,
     )
     .await?;
     Ok(token.map(|token| token.token))
 }
 
-pub async fn repos(env: &Env, installation_id: u64) -> Result<Answer<Vec<String>>> {
-    let token = match installation_token(env, installation_id).await? {
+pub async fn repos(
+    credentials: &Credentials<'_>,
+    installation_id: u64,
+) -> Result<Answer<Vec<String>>> {
+    let token = match installation_token(credentials, installation_id).await? {
         Ok(token) => token,
         Err(error) => return Ok(Err(error)),
     };
     let repositories: Answer<Repositories> = call(
         Method::Get,
         "/installation/repositories?per_page=100",
-        &format!("token {token}"),
+        Some(&format!("token {token}")),
         None,
     )
     .await?;
@@ -272,40 +324,40 @@ pub async fn repos(env: &Env, installation_id: u64) -> Result<Answer<Vec<String>
 }
 
 pub async fn create_issue(
-    env: &Env,
+    credentials: &Credentials<'_>,
     installation_id: u64,
     repo: &str,
     title: &str,
     body: &str,
 ) -> Result<Answer<Issue>> {
-    let token = match installation_token(env, installation_id).await? {
+    let token = match installation_token(credentials, installation_id).await? {
         Ok(token) => token,
         Err(error) => return Ok(Err(error)),
     };
     call(
         Method::Post,
         &format!("/repos/{repo}/issues"),
-        &format!("token {token}"),
+        Some(&format!("token {token}")),
         Some(&json!({ "title": title, "body": body })),
     )
     .await
 }
 
 pub async fn update_issue(
-    env: &Env,
+    credentials: &Credentials<'_>,
     installation_id: u64,
     repo: &str,
     number: u64,
     body: &str,
 ) -> Result<Answer<Issue>> {
-    let token = match installation_token(env, installation_id).await? {
+    let token = match installation_token(credentials, installation_id).await? {
         Ok(token) => token,
         Err(error) => return Ok(Err(error)),
     };
     call(
         Method::Patch,
         &format!("/repos/{repo}/issues/{number}"),
-        &format!("token {token}"),
+        Some(&format!("token {token}")),
         Some(&json!({ "body": body })),
     )
     .await

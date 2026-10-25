@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 use worker::*;
 
-use crate::github;
+use crate::github::{self, Credentials};
 use crate::slack;
 use crate::store::{self, Delivery};
 
@@ -10,6 +10,8 @@ const BACKOFF_MINUTES: [u32; 5] = [1, 5, 30, 120, 720];
 const MAX_ATTEMPTS: u32 = 6;
 const SWEEP_LIMIT: u32 = 10;
 const IMAGE_BASE: &str = "https://bugstack.kattebak.fyi/v1/images";
+const NO_GITHUB_APP: &str =
+    "NoGitHubApp the app names no stored GitHub App; pick its installation on the app edit page";
 
 fn fence(text: &str) -> String {
     let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
@@ -81,8 +83,21 @@ async fn fail(
     store::set_next_attempt(db, report_id, &store::minutes_from_now(wait)).await
 }
 
+fn credentials(report: &Delivery) -> Option<Credentials<'_>> {
+    let (Some(app_id_number), Some(private_key)) =
+        (report.github_app_number, &report.github_private_key)
+    else {
+        return None;
+    };
+    Some(Credentials {
+        app_id_number,
+        private_key,
+    })
+}
+
 async fn refresh_issue(
     env: &Env,
+    credentials: &Credentials<'_>,
     report_id: &str,
     report: &Delivery,
     url: &str,
@@ -93,7 +108,7 @@ async fn refresh_issue(
         return Ok(Ok(url.to_string()));
     }
     let updated = github::update_issue(
-        env,
+        credentials,
         report.github_installation_id,
         &report.github_repo,
         number,
@@ -112,13 +127,25 @@ async fn file_issue(
     report_id: &str,
     report: &Delivery,
 ) -> Result<std::result::Result<String, String>> {
+    let Some(credentials) = credentials(report) else {
+        return Ok(Err(NO_GITHUB_APP.to_string()));
+    };
     if let (Some(url), Some(number), Some(image_count)) =
         (&report.issue_url, report.issue_number, report.image_count)
     {
-        return refresh_issue(env, report_id, report, url, number, image_count).await;
+        return refresh_issue(
+            env,
+            &credentials,
+            report_id,
+            report,
+            url,
+            number,
+            image_count,
+        )
+        .await;
     }
     let issue = github::create_issue(
-        env,
+        &credentials,
         report.github_installation_id,
         &report.github_repo,
         &report.title,
