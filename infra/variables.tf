@@ -10,12 +10,6 @@ variable "app_domains" {
   default     = ["bugstack.kattebak.fyi", "bugstack.matthijs-f49.workers.dev"]
 }
 
-variable "admin_email" {
-  type        = string
-  description = "The one email address the admin policy allows."
-  default     = "matthijs@ischen.nl"
-}
-
 variable "otp_idp_id" {
   type        = string
   description = "One-time PIN identity provider, owned by stallion's state."

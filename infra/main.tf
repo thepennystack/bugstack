@@ -37,9 +37,7 @@ resource "cloudflare_zero_trust_access_policy" "admin" {
   name       = "bugstack-admin"
   decision   = "allow"
   include = [{
-    email = {
-      email = var.admin_email
-    }
+    everyone = {}
   }]
 }
 
