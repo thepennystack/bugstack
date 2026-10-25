@@ -256,6 +256,10 @@ nav[aria-label="breadcrumb"] ul li {
   margin-bottom: 2rem;
 }
 
+.card-grid.wide {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 26rem), 1fr));
+}
+
 .card-grid > article {
   margin: 0;
   display: flex;

@@ -244,7 +244,7 @@ export const GitHubApps = () => {
       {apps.isError && <Failure what="Loading the GitHub Apps" error={apps.error} />}
       {apps.isSuccess && apps.data.length === 0 && <Steps />}
       {apps.isSuccess && apps.data.length > 0 && (
-        <div class="card-grid">
+        <div class="card-grid wide">
           {apps.data.map((app) => (
             <GitHubAppCard key={app.githubAppId} app={app} />
           ))}

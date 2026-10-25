@@ -240,7 +240,7 @@ export const Workspaces = () => {
       {apps.isError && <Failure what="Loading the Slack apps" error={apps.error} />}
       {apps.isSuccess && apps.data.length === 0 && <Empty />}
       {apps.isSuccess && apps.data.length > 0 && (
-        <div class="card-grid">
+        <div class="card-grid wide">
           {apps.data.map((app) => (
             <SlackAppCard key={app.slackAppId} app={app} />
           ))}
