@@ -7,12 +7,15 @@ import { signedHeaders } from "./sign.mjs";
 
 const WORKERS_DEV = "bugstack.matthijs-f49.workers.dev";
 const ORIGINS = ["https://bugstack.kattebak.fyi", `https://${WORKERS_DEV}`];
+const SMOKE_REPO = "thepennystack/bugstack";
 const SMOKE_APP = {
   name: "bugstack-smoke",
   description: "Created by npm run smoke",
   installationId: 0,
-  githubRepo: "thepennystack/bugstack",
+  githubRepo: SMOKE_REPO,
 };
+const UNKNOWN_ID = "0000000000000000000000000";
+const DELIVERY_WAIT_MS = 20000;
 const SMOKE_CLIENT = "agent";
 const SIGNER = "smoke-signer";
 const SIGNER_FILE = join(CONFIG_DIR, "smoke-client");
@@ -71,8 +74,31 @@ const findOrCreateApp = async (origin, wanted) => {
   return created.body;
 };
 
+const githubState = async (origin) => {
+  const installations = await api(origin, "GET", "/api/github/installations");
+  check(
+    `${origin} GET /api/github/installations answers 503 SecretMissing or the list`,
+    (installations.status === 503 &&
+      installations.body.reason === "SecretMissing" &&
+      installations.body.message.includes("GITHUB_APP_")) ||
+      (installations.status === 200 && Array.isArray(installations.body)),
+    `${installations.status} ${JSON.stringify(installations.body)}`,
+  );
+  if (installations.status !== 200 || !Array.isArray(installations.body)) return undefined;
+  const owner = SMOKE_REPO.split("/")[0];
+  const installation = installations.body.find((each) => each.account === owner);
+  check(
+    `${origin} the GitHub App is installed on ${owner}`,
+    installation !== undefined,
+    JSON.stringify(installations.body),
+  );
+  return installation?.installationId;
+};
+
 const smokeApi = async (origin) => {
-  const app = await findOrCreateApp(origin, SMOKE_APP);
+  const installationId = await githubState(origin);
+  const appInput = { ...SMOKE_APP, installationId: installationId ?? 0 };
+  const app = await findOrCreateApp(origin, appInput);
   const listed = await api(origin, "GET", "/api/apps");
   check(
     `${origin} GET /api/apps returns ${app.appId}`,
@@ -80,7 +106,7 @@ const smokeApi = async (origin) => {
     `${listed.status} ${JSON.stringify(listed.body)}`,
   );
 
-  const put = await api(origin, "PUT", `/api/apps/${app.appId}`, SMOKE_APP);
+  const put = await api(origin, "PUT", `/api/apps/${app.appId}`, appInput);
   check(
     `${origin} PUT /api/apps/${app.appId} saves the app`,
     put.status === 200 && put.body.appId === app.appId && put.body.name === SMOKE_APP.name,
@@ -120,16 +146,13 @@ const smokeApi = async (origin) => {
   const revokedClient = await smokeRevoked(origin, app.appId, clients);
   const signer = await smokeSigner(origin, app.appId, clients);
   const other = await findOrCreateApp(origin, OTHER_APP);
-  smoked.reportTitle = await smokeReports(origin, app.appId, other.appId, signer, revokedClient);
-
-  const installations = await api(origin, "GET", "/api/github/installations");
-  check(
-    `${origin} GET /api/github/installations answers 503 SecretMissing or the list`,
-    (installations.status === 503 &&
-      installations.body.reason === "SecretMissing" &&
-      installations.body.message.includes("GITHUB_APP_")) ||
-      (installations.status === 200 && Array.isArray(installations.body)),
-    `${installations.status} ${JSON.stringify(installations.body)}`,
+  smoked.reportTitle = await smokeReports(
+    origin,
+    app.appId,
+    other.appId,
+    signer,
+    revokedClient,
+    installationId !== undefined,
   );
 
   for (const [label, body] of [
@@ -147,6 +170,7 @@ const smokeApi = async (origin) => {
   }
 
   for (const [method, path, body] of [
+    ["POST", `/api/reports/${UNKNOWN_ID}/retry`, {}],
     ["GET", "/api/apps/0000000000000000000000000", undefined],
     ["PUT", "/api/apps/0000000000000000000000000", SMOKE_APP],
     ["POST", "/api/apps/0000000000000000000000000/clients", { name: SMOKE_CLIENT }],
@@ -219,7 +243,66 @@ const postReport = async (origin, appId, body, headers) => {
   return { status: response.status, body: await json(response) };
 };
 
-const smokeReports = async (origin, appId, otherAppId, signer, revokedClientId) => {
+const findReport = async (origin, appId, reportId) => {
+  const reports = await api(origin, "GET", `/api/apps/${appId}/reports`);
+  const row = Array.isArray(reports.body)
+    ? reports.body.find((report) => report.reportId === reportId)
+    : undefined;
+  return { status: reports.status, length: reports.body.length, row };
+};
+
+const delivered = async (origin, appId, reportId) => {
+  const deadline = Date.now() + DELIVERY_WAIT_MS;
+  for (;;) {
+    const found = await findReport(origin, appId, reportId);
+    const done = found.row && (found.row.status !== "Pending" || found.row.lastFailure !== null);
+    if (done || Date.now() > deadline) return found;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+};
+
+const closeIssue = (url) => {
+  try {
+    execFileSync("gh", ["issue", "close", url, "--comment", "Closed by npm run smoke"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return "";
+  } catch (error) {
+    return String(error).split("\n")[0];
+  }
+};
+
+const checkFailurePath = (origin, row) => {
+  const failure = row?.lastFailure;
+  const wait = Date.parse(row?.nextAttemptAt ?? "") - Date.parse(failure?.failedAt ?? "");
+  check(
+    `${origin} delivery without the GitHub secrets records SecretMissing and backs off a minute`,
+    row?.status === "Pending" &&
+      row.attempts === 1 &&
+      row.issueUrl === null &&
+      failure?.step === "GitHub" &&
+      failure.message === "SecretMissing GITHUB_APP_ID" &&
+      wait > 55000 &&
+      wait < 65000,
+    JSON.stringify(row),
+  );
+};
+
+const ISSUE_URL = new RegExp(`^https://github\\.com/${SMOKE_REPO}/issues/\\d+$`);
+
+const checkHappyPath = (origin, row) => {
+  check(
+    `${origin} delivery files the report as an issue on ${SMOKE_REPO}`,
+    row?.status === "Filed" && row.attempts === 1 && ISSUE_URL.test(row.issueUrl ?? ""),
+    JSON.stringify(row),
+  );
+  if (typeof row?.issueUrl !== "string") return;
+  const closed = closeIssue(row.issueUrl);
+  check(`gh closes ${row.issueUrl}`, closed === "", closed);
+};
+
+const smokeReports = async (origin, appId, otherAppId, signer, revokedClientId, github) => {
   const title = `Smoke report ${commit.slice(0, 7)} ${new Date().toISOString()}`;
   const body = JSON.stringify({ title, error: "Error: smoke\n    at smoke.mjs", extra: 1 });
   const sign = (text, timestamp) => signedHeaders(signer.clientId, signer.secret, text, timestamp);
@@ -230,22 +313,25 @@ const smokeReports = async (origin, appId, otherAppId, signer, revokedClientId) 
     accepted.status === 202 && accepted.body.reportId?.length === 25,
     `${accepted.status} ${JSON.stringify(accepted.body)}`,
   );
-  const reports = await api(origin, "GET", `/api/apps/${appId}/reports`);
-  const row = Array.isArray(reports.body)
-    ? reports.body.find((report) => report.reportId === accepted.body.reportId)
-    : undefined;
+  const reports = await delivered(origin, appId, accepted.body.reportId);
+  const row = reports.row;
   check(
-    `${origin} GET /api/apps/${appId}/reports lists the report as Pending`,
+    `${origin} GET /api/apps/${appId}/reports lists the report`,
     reports.status === 200 &&
-      reports.body.length <= 100 &&
+      reports.length <= 100 &&
       row?.title === title &&
-      row.status === "Pending" &&
-      row.attempts === 0 &&
       row.clientName === SIGNER &&
-      row.issueUrl === null &&
-      row.slackPosted === false &&
-      row.lastFailure === null,
-    `${reports.status} ${JSON.stringify(row ?? reports.body).slice(0, 300)}`,
+      row.slackPosted === false,
+    `${reports.status} ${JSON.stringify(row).slice(0, 300)}`,
+  );
+  if (github) checkHappyPath(origin, row);
+  else checkFailurePath(origin, row);
+
+  const retried = await api(origin, "POST", `/api/reports/${accepted.body.reportId}/retry`, {});
+  check(
+    `${origin} POST /api/reports/{reportId}/retry refuses a ${row?.status} report with 409 NotFailed`,
+    retried.status === 409 && retried.body.reason === "NotFailed",
+    `${retried.status} ${JSON.stringify(retried.body)}`,
   );
 
   const now = Math.floor(Date.now() / 1000);
