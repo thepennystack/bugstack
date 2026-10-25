@@ -50,33 +50,35 @@ const fail = async (step, response) => {
   process.exit(1);
 };
 
-const upload = async (path) => {
+const contentTypeOf = (path) => {
   const contentType = CONTENT_TYPES[extname(path).toLowerCase()];
   if (!contentType) {
     console.error(`${path}: the extension must be one of ${Object.keys(CONTENT_TYPES).join(", ")}`);
     process.exit(2);
   }
-  const bytes = readFileSync(path);
-  const reserved = await signedPost(`/v1/apps/${appId}/uploads`, {
-    contentType,
-    size: bytes.length,
-  });
-  if (reserved.status !== 201) await fail(`reserve ${path}`, reserved);
-  const { imageId, uploadUrl } = await reserved.json();
-  const stored = await fetch(uploadUrl, {
+  return contentType;
+};
+
+const files = (values.image ?? []).map((path) => ({
+  path,
+  contentType: contentTypeOf(path),
+  bytes: readFileSync(path),
+}));
+
+const { image: _paths, ...fields } = values;
+const images = files.map(({ contentType, bytes }) => ({ contentType, size: bytes.length }));
+const report = images.length > 0 ? { title, ...fields, images } : { title, ...fields };
+const response = await signedPost(`/v1/apps/${appId}/reports`, report);
+if (response.status !== 202) await fail("report", response);
+const accepted = await response.json();
+console.log(`202 ${JSON.stringify(accepted)}`);
+
+for (const [index, { path, contentType, bytes }] of files.entries()) {
+  const stored = await fetch(accepted.uploads[index].uploadUrl, {
     method: "PUT",
     headers: { "content-type": contentType },
     body: bytes,
   });
   if (stored.status !== 200) await fail(`upload ${path}`, stored);
-  return imageId;
-};
-
-const images = [];
-for (const path of values.image ?? []) images.push(await upload(path));
-
-const { image: _paths, ...fields } = values;
-const report = images.length > 0 ? { title, ...fields, images } : { title, ...fields };
-const response = await signedPost(`/v1/apps/${appId}/reports`, report);
-console.log(`${response.status} ${await response.text()}`);
-if (!response.ok) process.exit(1);
+  console.log(`stored ${path} as ${accepted.uploads[index].imageId}`);
+}
