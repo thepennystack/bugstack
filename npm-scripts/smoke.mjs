@@ -589,6 +589,21 @@ const delivered = async (origin, appId, reportId) => {
   }
 };
 
+const LEASE_MS = 4 * 60 * 1000;
+
+const backedOff = async (origin, appId, reportId) => {
+  const deadline = Date.now() + DELIVERY_WAIT_MS;
+  for (;;) {
+    const found = await findReport(origin, appId, reportId);
+    const row = found.row;
+    const wait =
+      Date.parse(row?.nextAttemptAt ?? "") - Date.parse(row?.lastFailure?.failedAt ?? "");
+    const settled = row?.attempts === 1 && row.lastFailure !== null && wait < LEASE_MS;
+    if (settled || Date.now() > deadline) return row;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+};
+
 const closeIssue = (url) => {
   try {
     execFileSync("gh", ["issue", "close", url, "--comment", "Closed by npm run smoke"], {
@@ -653,7 +668,7 @@ const smokeReports = async (origin, appId, otherAppId, signer, revokedClientId, 
     `${reports.status} ${JSON.stringify(row).slice(0, 300)}`,
   );
   if (github) checkHappyPath(origin, row);
-  else checkFailurePath(origin, row);
+  else checkFailurePath(origin, await backedOff(origin, appId, accepted.body.reportId));
 
   const retried = await api(origin, "POST", `${ORG}/reports/${accepted.body.reportId}/retry`, {});
   check(
@@ -1147,6 +1162,14 @@ const smokePages = async (origin) => {
   };
   const org = `/orgs/${smoked.orgId}`;
   await visit("an app list from /", "/", /bugstack-smoke/);
+  await visit("the create organisation form", "/orgs/new", "Create an organisation");
+  await visit("the Members page with the invite form", `${org}/members`, "No email is sent");
+  await visit("the Members page listing the service token", `${org}/members`, clientId);
+  await visit(
+    "the not-a-member notice for an unknown org",
+    `/orgs/${UNKNOWN_ID}/apps`,
+    "You are not in this organisation",
+  );
   await visit("the app list", `${org}/apps`, SMOKE_APP.name);
   await visit("the app page with its clients", `${org}/apps/${smoked.appId}`, smoked.clientId);
   await visit("the app page with its reports", `${org}/apps/${smoked.appId}`, smoked.reportTitle);
