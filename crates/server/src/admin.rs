@@ -147,7 +147,7 @@ async fn body(req: &mut Request) -> Result<std::result::Result<Value, Response>>
     }
 }
 
-pub async fn handle(mut req: Request, env: &Env) -> Result<Response> {
+pub async fn handle(mut req: Request, env: &Env, ctx: &Context) -> Result<Response> {
     let admin = match caller(&req, env).await? {
         Caller::Admin(admin) => admin,
         Caller::Denied(reason) => {
@@ -171,6 +171,7 @@ pub async fn handle(mut req: Request, env: &Env) -> Result<Response> {
             body,
         },
         env,
+        ctx,
     )
     .await
 }

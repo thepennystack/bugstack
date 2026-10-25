@@ -102,6 +102,11 @@ pub fn now() -> String {
     String::from(js_sys::Date::new_0().to_iso_string())
 }
 
+pub fn minutes_from_now(minutes: u32) -> String {
+    let at = js_sys::Date::now() + f64::from(minutes) * 60_000.0;
+    String::from(js_sys::Date::new(&JsValue::from_f64(at)).to_iso_string())
+}
+
 fn text(value: &str) -> JsValue {
     JsValue::from_str(value)
 }
@@ -267,6 +272,7 @@ pub struct ReportRow {
     pub attempts: u32,
     pub received_at: String,
     pub client_name: String,
+    pub next_attempt_at: String,
     pub issue_url: Option<String>,
     pub slack_posted: bool,
     pub last_failure: Option<LastFailure>,
@@ -280,6 +286,7 @@ struct ReportRecord {
     attempts: u32,
     received_at: String,
     client_name: String,
+    next_attempt_at: String,
     issue_url: Option<String>,
     slack_posted: u8,
     failed_at: Option<String>,
@@ -304,6 +311,7 @@ impl From<ReportRecord> for ReportRow {
             attempts: row.attempts,
             received_at: row.received_at,
             client_name: row.client_name,
+            next_attempt_at: row.next_attempt_at,
             issue_url: row.issue_url,
             slack_posted: row.slack_posted != 0,
             last_failure,
@@ -311,23 +319,154 @@ impl From<ReportRecord> for ReportRow {
     }
 }
 
+const REPORT_SELECT: &str = "SELECT r.report_id, r.title, r.status, r.attempts, r.received_at, \
+     c.name AS client_name, r.next_attempt_at, g.url AS issue_url, \
+     (p.report_id IS NOT NULL) AS slack_posted, f.failed_at, f.step, f.message \
+     FROM report r \
+     JOIN client c ON c.client_id = r.client_id \
+     LEFT JOIN github_issue g ON g.report_id = r.report_id \
+     LEFT JOIN slack_post p ON p.report_id = r.report_id \
+     LEFT JOIN failure f ON f.report_id = r.report_id AND f.failed_at = \
+     (SELECT MAX(failed_at) FROM failure WHERE report_id = r.report_id)";
+
 pub async fn list_reports(db: &D1Database, app_id: &str) -> Result<Vec<ReportRow>> {
     let rows: Vec<ReportRecord> = db
-        .prepare(
-            "SELECT r.report_id, r.title, r.status, r.attempts, r.received_at, \
-             c.name AS client_name, g.url AS issue_url, \
-             (p.report_id IS NOT NULL) AS slack_posted, f.failed_at, f.step, f.message \
-             FROM report r \
-             JOIN client c ON c.client_id = r.client_id \
-             LEFT JOIN github_issue g ON g.report_id = r.report_id \
-             LEFT JOIN slack_post p ON p.report_id = r.report_id \
-             LEFT JOIN failure f ON f.report_id = r.report_id AND f.failed_at = \
-             (SELECT MAX(failed_at) FROM failure WHERE report_id = r.report_id) \
-             WHERE r.app_id = ?1 ORDER BY r.received_at DESC, r.report_id DESC LIMIT 100",
-        )
+        .prepare(format!(
+            "{REPORT_SELECT} WHERE r.app_id = ?1 \
+             ORDER BY r.received_at DESC, r.report_id DESC LIMIT 100"
+        ))
         .bind(&[text(app_id)])?
         .all()
         .await?
         .results()?;
     Ok(rows.into_iter().map(ReportRow::from).collect())
+}
+
+pub async fn get_report(db: &D1Database, report_id: &str) -> Result<Option<ReportRow>> {
+    let row: Option<ReportRecord> = db
+        .prepare(format!("{REPORT_SELECT} WHERE r.report_id = ?1"))
+        .bind(&[text(report_id)])?
+        .first(None)
+        .await?;
+    Ok(row.map(ReportRow::from))
+}
+
+#[derive(Deserialize)]
+struct Attempts {
+    attempts: u32,
+}
+
+pub async fn claim(db: &D1Database, report_id: &str, lease_until: &str) -> Result<Option<u32>> {
+    let claimed: Option<Attempts> = db
+        .prepare(
+            "UPDATE report SET attempts = attempts + 1, next_attempt_at = ?2 \
+             WHERE report_id = ?1 AND status = 'Pending' AND next_attempt_at <= ?3 \
+             RETURNING attempts",
+        )
+        .bind(&[text(report_id), text(lease_until), text(&now())])?
+        .first(None)
+        .await?;
+    Ok(claimed.map(|row| row.attempts))
+}
+
+#[derive(Deserialize)]
+pub struct Delivery {
+    pub title: String,
+    pub payload: String,
+    pub received_at: String,
+    pub client_name: String,
+    pub github_installation_id: u64,
+    pub github_repo: String,
+    pub issue_url: Option<String>,
+}
+
+pub async fn delivery(db: &D1Database, report_id: &str) -> Result<Delivery> {
+    let row: Option<Delivery> = db
+        .prepare(
+            "SELECT r.title, r.payload, r.received_at, c.name AS client_name, \
+             a.github_installation_id, a.github_repo, g.url AS issue_url \
+             FROM report r \
+             JOIN client c ON c.client_id = r.client_id \
+             JOIN app a ON a.app_id = r.app_id \
+             LEFT JOIN github_issue g ON g.report_id = r.report_id \
+             WHERE r.report_id = ?1",
+        )
+        .bind(&[text(report_id)])?
+        .first(None)
+        .await?;
+    row.ok_or_else(|| worker::Error::RustError(format!("report {report_id} vanished after claim")))
+}
+
+pub async fn insert_issue(db: &D1Database, report_id: &str, number: u64, url: &str) -> Result<()> {
+    db.prepare(
+        "INSERT INTO github_issue (report_id, number, url, created_at) VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(&[
+        text(report_id),
+        JsValue::from_f64(number as f64),
+        text(url),
+        text(&now()),
+    ])?
+    .run()
+    .await?;
+    Ok(())
+}
+
+pub async fn insert_failure(
+    db: &D1Database,
+    report_id: &str,
+    step: &str,
+    message: &str,
+) -> Result<()> {
+    db.prepare("INSERT INTO failure (report_id, failed_at, step, message) VALUES (?1, ?2, ?3, ?4)")
+        .bind(&[text(report_id), text(&now()), text(step), text(message)])?
+        .run()
+        .await?;
+    Ok(())
+}
+
+pub async fn set_next_attempt(db: &D1Database, report_id: &str, at: &str) -> Result<()> {
+    db.prepare("UPDATE report SET next_attempt_at = ?2 WHERE report_id = ?1")
+        .bind(&[text(report_id), text(at)])?
+        .run()
+        .await?;
+    Ok(())
+}
+
+pub async fn set_status(db: &D1Database, report_id: &str, status: &str) -> Result<()> {
+    db.prepare("UPDATE report SET status = ?2 WHERE report_id = ?1")
+        .bind(&[text(report_id), text(status)])?
+        .run()
+        .await?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct Due {
+    report_id: String,
+}
+
+pub async fn due_reports(db: &D1Database, limit: u32) -> Result<Vec<String>> {
+    let rows: Vec<Due> = db
+        .prepare(
+            "SELECT report_id FROM report WHERE status = 'Pending' AND next_attempt_at <= ?1 \
+             ORDER BY next_attempt_at, report_id LIMIT ?2",
+        )
+        .bind(&[text(&now()), JsValue::from_f64(f64::from(limit))])?
+        .all()
+        .await?
+        .results()?;
+    Ok(rows.into_iter().map(|row| row.report_id).collect())
+}
+
+pub async fn reset_failed(db: &D1Database, report_id: &str) -> Result<bool> {
+    let reset: Option<Due> = db
+        .prepare(
+            "UPDATE report SET status = 'Pending', attempts = 0, next_attempt_at = ?2 \
+             WHERE report_id = ?1 AND status = 'Failed' RETURNING report_id",
+        )
+        .bind(&[text(report_id), text(&now())])?
+        .first(None)
+        .await?;
+    Ok(reset.is_some())
 }

@@ -4,7 +4,7 @@ use js_sys::futures::JsFuture;
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use wasm_bindgen::{JsCast, JsValue};
 use worker::*;
 
@@ -17,8 +17,31 @@ const BODY_EXCERPT: usize = 500;
 pub enum GitHubError {
     SecretMissing(&'static str),
     SecretInvalid(String),
-    NotFound(String),
+    Answered {
+        request: String,
+        status: u16,
+        excerpt: String,
+    },
     Failed(String),
+}
+
+impl GitHubError {
+    pub fn failure(&self) -> String {
+        match self {
+            GitHubError::SecretMissing(name) => format!("SecretMissing {name}"),
+            GitHubError::SecretInvalid(message) => format!("SecretInvalid {message}"),
+            GitHubError::Answered {
+                status, excerpt, ..
+            } => format!("{status} {excerpt}"),
+            GitHubError::Failed(message) => message.clone(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct Issue {
+    pub number: u64,
+    pub html_url: String,
 }
 
 #[derive(Serialize)]
@@ -143,25 +166,45 @@ async fn call<T: DeserializeOwned>(
     method: Method,
     path: &str,
     authorization: &str,
+    body: Option<&Value>,
 ) -> Result<Answer<T>> {
     let headers = Headers::new();
     headers.set("Accept", "application/vnd.github+json")?;
     headers.set("X-GitHub-Api-Version", "2022-11-28")?;
     headers.set("User-Agent", "bugstack")?;
     headers.set("Authorization", authorization)?;
+    if body.is_some() {
+        headers.set("Content-Type", "application/json")?;
+    }
     let mut init = RequestInit::new();
     init.with_method(method.clone()).with_headers(headers);
-    let request = Request::new_with_init(&format!("{API}{path}"), &init)?;
-    let mut response = Fetch::Request(request).send().await?;
-    let status = response.status_code();
-    let text = response.text().await?;
-    let excerpt: String = text.chars().take(BODY_EXCERPT).collect();
-    let label = format!("GitHub {method} {path} answered {status} {excerpt}");
-    if status == 404 {
-        return Ok(Err(GitHubError::NotFound(label)));
+    if let Some(body) = body {
+        init.with_body(Some(JsValue::from_str(&body.to_string())));
     }
+    let request = Request::new_with_init(&format!("{API}{path}"), &init)?;
+    let mut response = match Fetch::Request(request).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return Ok(Err(GitHubError::Failed(format!(
+                "GitHub {method} {path} did not answer: {error}"
+            ))));
+        }
+    };
+    let status = response.status_code();
+    let text = match response.text().await {
+        Ok(text) => text,
+        Err(error) => {
+            return Ok(Err(GitHubError::Failed(format!(
+                "GitHub {method} {path} broke off its answer: {error}"
+            ))));
+        }
+    };
     if !(200..300).contains(&status) {
-        return Ok(Err(GitHubError::Failed(label)));
+        return Ok(Err(GitHubError::Answered {
+            request: format!("{method} {path}"),
+            status,
+            excerpt: text.chars().take(BODY_EXCERPT).collect(),
+        }));
     }
     match serde_json::from_str(&text) {
         Ok(value) => Ok(Ok(value)),
@@ -180,6 +223,7 @@ pub async fn installations(env: &Env) -> Result<Answer<Vec<Installation>>> {
         Method::Get,
         "/app/installations?per_page=100",
         &format!("Bearer {jwt}"),
+        None,
     )
     .await?;
     Ok(raw.map(|all| {
@@ -201,6 +245,7 @@ pub async fn installation_token(env: &Env, installation_id: u64) -> Result<Answe
         Method::Post,
         &format!("/app/installations/{installation_id}/access_tokens"),
         &format!("Bearer {jwt}"),
+        None,
     )
     .await?;
     Ok(token.map(|token| token.token))
@@ -215,6 +260,7 @@ pub async fn repos(env: &Env, installation_id: u64) -> Result<Answer<Vec<String>
         Method::Get,
         "/installation/repositories?per_page=100",
         &format!("token {token}"),
+        None,
     )
     .await?;
     Ok(repositories.map(|all| {
@@ -223,4 +269,24 @@ pub async fn repos(env: &Env, installation_id: u64) -> Result<Answer<Vec<String>
             .map(|repository| repository.full_name)
             .collect()
     }))
+}
+
+pub async fn create_issue(
+    env: &Env,
+    installation_id: u64,
+    repo: &str,
+    title: &str,
+    body: &str,
+) -> Result<Answer<Issue>> {
+    let token = match installation_token(env, installation_id).await? {
+        Ok(token) => token,
+        Err(error) => return Ok(Err(error)),
+    };
+    call(
+        Method::Post,
+        &format!("/repos/{repo}/issues"),
+        &format!("token {token}"),
+        Some(&json!({ "title": title, "body": body })),
+    )
+    .await
 }

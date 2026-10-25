@@ -2,9 +2,9 @@ use serde::Serialize;
 use serde_json::Value;
 use worker::*;
 
-use crate::refuse;
 use crate::sign::{self, Verdict};
 use crate::store::{self, NewReport};
+use crate::{deliver, refuse};
 
 const MAX_BODY: usize = 60 * 1024;
 const TITLE_MAX: usize = 200;
@@ -60,7 +60,7 @@ fn title(report: &Value) -> std::result::Result<String, String> {
     Ok(title.to_string())
 }
 
-pub async fn handle(mut req: Request, env: &Env, app_id: &str) -> Result<Response> {
+pub async fn handle(mut req: Request, env: &Env, ctx: &Context, app_id: &str) -> Result<Response> {
     let body = req.bytes().await?;
     if body.len() > MAX_BODY {
         return refuse(
@@ -109,5 +109,10 @@ pub async fn handle(mut req: Request, env: &Env, app_id: &str) -> Result<Respons
         },
     )
     .await?;
-    Ok(Response::from_json(&Accepted { report_id })?.with_status(202))
+    let response = Response::from_json(&Accepted {
+        report_id: report_id.clone(),
+    })?
+    .with_status(202);
+    deliver::in_background(ctx, env, report_id);
+    Ok(response)
 }

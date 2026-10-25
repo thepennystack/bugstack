@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod auth;
+pub mod deliver;
 pub mod github;
 pub mod ingest;
 pub mod random;
@@ -27,8 +28,8 @@ fn stamp_commit(response: Response) -> Result<Response> {
 }
 
 #[event(fetch)]
-async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    stamp_commit(route(req, &env).await?)
+async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
+    stamp_commit(route(req, &env, &ctx).await?)
 }
 
 fn report_app(path: &str) -> Option<&str> {
@@ -37,16 +38,16 @@ fn report_app(path: &str) -> Option<&str> {
         .filter(|app_id| !app_id.is_empty() && !app_id.contains('/'))
 }
 
-async fn route(req: Request, env: &Env) -> Result<Response> {
+async fn route(req: Request, env: &Env, ctx: &Context) -> Result<Response> {
     let url = req.url()?;
     if url.path().starts_with("/api/") {
-        return admin::handle(req, env).await;
+        return admin::handle(req, env, ctx).await;
     }
     if req.method() == Method::Post
         && let Some(app_id) = report_app(url.path())
     {
         let app_id = app_id.to_string();
-        return ingest::handle(req, env, &app_id).await;
+        return ingest::handle(req, env, ctx, &app_id).await;
     }
     if req.method() == Method::Get && url.path() == "/v1/health" {
         return Response::from_json(&json!({ "commit": COMMIT }));
@@ -59,4 +60,8 @@ async fn route(req: Request, env: &Env) -> Result<Response> {
 }
 
 #[event(scheduled)]
-async fn scheduled(_event: ScheduledEvent, _env: Env, _ctx: ScheduleContext) {}
+async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
+    if let Err(error) = deliver::sweep(&env).await {
+        console_error!("the delivery sweep failed: {error}");
+    }
+}

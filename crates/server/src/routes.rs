@@ -4,8 +4,8 @@ use worker::*;
 
 use crate::admin::{ApiRequest, Me};
 use crate::github::{self, GitHubError};
-use crate::refuse;
 use crate::store::{self, AppInput, Client};
+use crate::{deliver, refuse};
 
 const NAME_MAX: usize = 80;
 const DESCRIPTION_MAX: usize = 500;
@@ -115,7 +115,24 @@ fn github_failure(error: GitHubError) -> Result<Response> {
             &format!("the Worker secret {name} is not set; set it with npm run secret -- {name}"),
         ),
         GitHubError::SecretInvalid(message) => refuse(503, "SecretInvalid", &message),
-        GitHubError::NotFound(message) => refuse(404, "NotFound", &message),
+        GitHubError::Answered {
+            request,
+            status: 404,
+            excerpt,
+        } => refuse(
+            404,
+            "NotFound",
+            &format!("GitHub {request} answered 404 {excerpt}"),
+        ),
+        GitHubError::Answered {
+            request,
+            status,
+            excerpt,
+        } => refuse(
+            502,
+            "GitHubFailed",
+            &format!("GitHub {request} answered {status} {excerpt}"),
+        ),
         GitHubError::Failed(message) => refuse(502, "GitHubFailed", &message),
     }
 }
@@ -197,7 +214,26 @@ async fn list_reports(db: &D1Database, app_id: &str) -> Result<Response> {
     Response::from_json(&store::list_reports(db, app_id).await?)
 }
 
-pub async fn route(request: ApiRequest, env: &Env) -> Result<Response> {
+async fn retry(env: &Env, ctx: &Context, report_id: &str) -> Result<Response> {
+    let db = env.d1("DB")?;
+    if !store::reset_failed(&db, report_id).await? {
+        return match store::get_report(&db, report_id).await? {
+            Some(report) => refuse(
+                409,
+                "NotFailed",
+                &format!("report {report_id} is {}, not Failed", report.status),
+            ),
+            None => not_found("report", report_id),
+        };
+    }
+    let report = store::get_report(&db, report_id).await?.ok_or_else(|| {
+        Error::RustError(format!("report {report_id} vanished after the retry reset"))
+    })?;
+    deliver::in_background(ctx, env, report_id.to_string());
+    Response::from_json(&report)
+}
+
+pub async fn route(request: ApiRequest, env: &Env, ctx: &Context) -> Result<Response> {
     let segments: Vec<&str> = request
         .path
         .trim_start_matches("/api/")
@@ -222,6 +258,7 @@ pub async fn route(request: ApiRequest, env: &Env) -> Result<Response> {
         (Method::Post, ["clients", client_id, "revoke"]) => {
             revoke_client(&env.d1("DB")?, client_id).await
         }
+        (Method::Post, ["reports", report_id, "retry"]) => retry(env, ctx, report_id).await,
         _ => no_route(&request),
     }
 }
