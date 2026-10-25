@@ -22,6 +22,8 @@ const SIGNER_FILE = join(CONFIG_DIR, "smoke-client");
 const REVOKE_CLIENT = "smoke-revoke";
 const OTHER_APP = { ...SMOKE_APP, name: "bugstack-smoke-other" };
 const MAX_BODY = 60 * 1024;
+const SLACK_CHANNEL = process.env.BUGSTACK_SMOKE_SLACK_CHANNEL ?? "";
+const SLACK_OUTSIDE = process.env.BUGSTACK_SMOKE_SLACK_OUTSIDE ?? "general";
 const commit =
   process.argv[2] ?? execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 const token = accessHeaders();
@@ -154,6 +156,8 @@ const smokeApi = async (origin) => {
     revokedClient,
     installationId !== undefined,
   );
+
+  await smokeSlack(origin, app.appId, other.appId, signer, installationId !== undefined);
 
   for (const [label, body] of [
     ["an empty name", { ...SMOKE_APP, name: "  " }],
@@ -377,6 +381,158 @@ const smokeReports = async (origin, appId, otherAppId, signer, revokedClientId, 
   return title;
 };
 
+const SLACK_POSTED = "slackPosted is true and the report is Filed";
+
+const slackReport = async (origin, appId, signer, label) => {
+  const title = `Smoke Slack ${label} ${commit.slice(0, 7)} ${new Date().toISOString()}`;
+  const body = JSON.stringify({ title, body: "Sent by npm run smoke" });
+  const accepted = await postReport(
+    origin,
+    appId,
+    body,
+    signedHeaders(signer.clientId, signer.secret, body),
+  );
+  if (accepted.status !== 202) return { accepted };
+  const found = await delivered(origin, appId, accepted.body.reportId);
+  return { accepted, row: found.row };
+};
+
+const closeRowIssue = (row) => {
+  if (typeof row?.issueUrl !== "string") return;
+  const closed = closeIssue(row.issueUrl);
+  check(`gh closes ${row.issueUrl}`, closed === "", closed);
+};
+
+const smokeSlackHappyPath = async (origin, appId, signer, workspace) => {
+  const slackPath = `/api/apps/${appId}/slack`;
+  const linked = await api(origin, "PUT", slackPath, {
+    workspaceId: workspace.workspaceId,
+    channel: SLACK_CHANNEL,
+  });
+  check(
+    `${origin} PUT ${slackPath} links #${SLACK_CHANNEL} with 204`,
+    linked.status === 204,
+    `${linked.status} ${JSON.stringify(linked.body)}`,
+  );
+  const inUse = await api(origin, "DELETE", `/api/slack/workspaces/${workspace.workspaceId}`);
+  check(
+    `${origin} DELETE a linked Slack workspace answers 409 InUse`,
+    inUse.status === 409 && inUse.body.reason === "InUse",
+    `${inUse.status} ${JSON.stringify(inUse.body)}`,
+  );
+
+  const posted = await slackReport(origin, appId, signer, "post");
+  check(
+    `${origin} a report to #${SLACK_CHANNEL} posts to Slack: ${SLACK_POSTED}`,
+    posted.row?.status === "Filed" && posted.row.slackPosted === true,
+    JSON.stringify(posted.row ?? posted.accepted),
+  );
+  closeRowIssue(posted.row);
+
+  await api(origin, "PUT", slackPath, {
+    workspaceId: workspace.workspaceId,
+    channel: SLACK_OUTSIDE,
+  });
+  const outside = await slackReport(origin, appId, signer, "outside");
+  const failure = outside.row?.lastFailure;
+  check(
+    `${origin} a report to #${SLACK_OUTSIDE} without the bot records not_in_channel`,
+    outside.row?.status === "Pending" &&
+      outside.row.slackPosted === false &&
+      typeof outside.row.issueUrl === "string" &&
+      failure?.step === "Slack" &&
+      failure.message.includes("not_in_channel"),
+    JSON.stringify(outside.row ?? outside.accepted),
+  );
+  closeRowIssue(outside.row);
+
+  const unlinked = await api(origin, "DELETE", slackPath);
+  check(
+    `${origin} DELETE ${slackPath} unlinks Slack with 204`,
+    unlinked.status === 204,
+    `${unlinked.status} ${JSON.stringify(unlinked.body)}`,
+  );
+};
+
+const smokeSlack = async (origin, appId, otherAppId, signer, github) => {
+  const workspaces = await api(origin, "GET", "/api/slack/workspaces");
+  check(
+    `${origin} GET /api/slack/workspaces lists workspaces without a bot token`,
+    workspaces.status === 200 &&
+      Array.isArray(workspaces.body) &&
+      workspaces.body.every((each) => !("botToken" in each) && !("bot_token" in each)),
+    `${workspaces.status} ${JSON.stringify(workspaces.body)}`,
+  );
+
+  const bogus = await api(origin, "POST", "/api/slack/workspaces", {
+    name: "bugstack-smoke-bogus",
+    botToken: ["xoxb", "smoke", "bogus"].join("-"),
+  });
+  check(
+    `${origin} POST /api/slack/workspaces refuses a bogus token with 400 and the auth.test error`,
+    bogus.status === 400 &&
+      bogus.body.reason === "Invalid" &&
+      /^Slack auth\.test refused the token: [a-z_]+$/.test(bogus.body.message ?? ""),
+    `${bogus.status} ${JSON.stringify(bogus.body)}`,
+  );
+  console.log(`     auth.test said: ${bogus.body.message}`);
+
+  for (const [label, body] of [
+    ["an empty name", { name: " ", botToken: "xoxb-1" }],
+    ["a token that is not a bot token", { name: "bugstack-smoke-bogus", botToken: "xoxp-1" }],
+  ]) {
+    const refused = await api(origin, "POST", "/api/slack/workspaces", body);
+    check(
+      `${origin} POST /api/slack/workspaces refuses ${label} with 400`,
+      refused.status === 400 && refused.body.reason === "Invalid",
+      `${refused.status} ${JSON.stringify(refused.body)}`,
+    );
+  }
+
+  for (const [method, path, body] of [
+    ["PUT", `/api/apps/${appId}/slack`, { workspaceId: UNKNOWN_ID, channel: "bugs" }],
+    ["PUT", `/api/apps/${UNKNOWN_ID}/slack`, { workspaceId: UNKNOWN_ID, channel: "bugs" }],
+    ["DELETE", `/api/apps/${UNKNOWN_ID}/slack`, undefined],
+    ["DELETE", `/api/slack/workspaces/${UNKNOWN_ID}`, undefined],
+  ]) {
+    const missing = await api(origin, method, path, body);
+    check(
+      `${origin} ${method} ${path} answers 404 NotFound`,
+      missing.status === 404 && missing.body.reason === "NotFound",
+      `${missing.status} ${JSON.stringify(missing.body)}`,
+    );
+  }
+
+  const blank = await api(origin, "PUT", `/api/apps/${appId}/slack`, {
+    workspaceId: UNKNOWN_ID,
+    channel: "   ",
+  });
+  check(
+    `${origin} PUT /api/apps/{appId}/slack refuses a blank channel with 400`,
+    blank.status === 400 && blank.body.reason === "Invalid",
+    `${blank.status} ${JSON.stringify(blank.body)}`,
+  );
+
+  const unlinked = await api(origin, "DELETE", `/api/apps/${otherAppId}/slack`);
+  check(
+    `${origin} DELETE /api/apps/{appId}/slack on an app without Slack answers 204`,
+    unlinked.status === 204,
+    `${unlinked.status} ${JSON.stringify(unlinked.body)}`,
+  );
+
+  const workspace = Array.isArray(workspaces.body) ? workspaces.body[0] : undefined;
+  const missing = [
+    workspace === undefined && "no Slack workspace exists",
+    SLACK_CHANNEL === "" && "BUGSTACK_SMOKE_SLACK_CHANNEL is not set",
+    !github && "the GitHub App secrets are not set",
+  ].filter(Boolean);
+  if (missing.length > 0) {
+    console.log(`skip the Slack happy path: ${missing.join(", ")}`);
+    return;
+  }
+  await smokeSlackHappyPath(origin, appId, signer, workspace);
+};
+
 const smokePages = async (origin) => {
   const browser = await chromium.launch();
   const context = await browser.newContext({ extraHTTPHeaders: token });
@@ -397,6 +553,12 @@ const smokePages = async (origin) => {
     "the app form with the GitHub notice or picker",
     "/apps/new",
     /GitHub App secrets are missing|GitHub installation/,
+  );
+  await visit("the Slack workspaces page", "/slack", "Add a workspace");
+  await visit(
+    "the app page with its Slack section",
+    `/apps/${smoked.appId}`,
+    /Reports from this app go to GitHub only|No Slack workspaces yet/,
   );
   await visit("the edit form", `/apps/${smoked.appId}/edit`, `Edit ${SMOKE_APP.name}`);
   await browser.close();
