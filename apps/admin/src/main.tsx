@@ -3,7 +3,7 @@ import { render } from "preact";
 import { Link, Route, Switch, useLocation } from "wouter-preact";
 import { getHealth, getMe, isUnauthorized } from "./api";
 import { AppList, AppPage, EditApp, NewApp } from "./apps";
-import { GitHubApps } from "./github";
+import { GitHubInstallations } from "./github";
 import { Failure, ISSUES, SignedOut } from "./notices";
 import { Workspaces } from "./slack";
 import { BrandMark, PageHeader, REPO } from "./ui";
@@ -130,7 +130,7 @@ const Shell = () => {
         ) : (
           <Switch>
             <Route path="/" component={AppList} />
-            <Route path="/github" component={GitHubApps} />
+            <Route path="/github" component={GitHubInstallations} />
             <Route path="/slack" component={Workspaces} />
             <Route path="/apps/new" component={NewApp} />
             <Route path="/apps/:appId/edit" component={EditApp} />

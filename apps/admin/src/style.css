@@ -567,15 +567,6 @@ form > button[type="submit"] {
   margin-bottom: 0;
 }
 
-.how-to {
-  font-size: 0.9rem;
-  margin-bottom: 1.25rem;
-}
-
-.how-to li {
-  margin-bottom: 0.35rem;
-}
-
 .inline-form {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
@@ -881,33 +872,6 @@ code.secret {
   margin-top: 0.25rem;
 }
 
-dialog.step > article {
-  width: min(100%, 36rem);
-}
-
-dialog.step > article > header h2 {
-  font-size: 1.15rem;
-  margin-bottom: 0.25rem;
-}
-
-dialog.step > article > header p {
-  margin: 0;
-  font-size: 0.9rem;
-}
-
-dialog.step form {
-  margin-bottom: 0;
-}
-
-dialog.step form > footer.actions {
-  margin-top: 0.5rem;
-}
-
-dialog.step form > footer.actions > button {
-  margin: 0;
-  width: auto;
-}
-
 @media (max-width: 640px) {
   .topbar nav {
     flex-wrap: nowrap;
@@ -978,15 +942,6 @@ dialog.step form > footer.actions > button {
   .actions > button,
   .actions > a.button,
   form > button[type="submit"],
-  dialog.step form > footer.actions > button {
-    flex: 1 1 100%;
-    width: 100%;
-  }
-
-  dialog.step > article {
-    padding-inline: 1rem;
-  }
-
   .card-actions > * {
     flex: 1 1 auto;
   }

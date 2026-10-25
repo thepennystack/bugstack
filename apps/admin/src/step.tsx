@@ -1,38 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/preact-query";
-import type { ComponentChildren } from "preact";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useState } from "preact/hooks";
 import { Failure } from "./notices";
-
-export const Step = ({
-  title,
-  description,
-  onClose,
-  children,
-}: {
-  title: string;
-  description: ComponentChildren;
-  onClose: () => void;
-  children: ComponentChildren;
-}) => {
-  const dialog = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    const element = dialog.current;
-    if (element === null) return;
-    element.showModal();
-  }, []);
-  return (
-    <dialog ref={dialog} class="step" aria-labelledby="step-title" onClose={onClose}>
-      <article>
-        <header>
-          <button type="button" aria-label="Close" class="close" onClick={onClose} />
-          <h2 id="step-title">{title}</h2>
-          <p class="muted">{description}</p>
-        </header>
-        {children}
-      </article>
-    </dialog>
-  );
-};
 
 export const ConfirmDelete = ({
   name,

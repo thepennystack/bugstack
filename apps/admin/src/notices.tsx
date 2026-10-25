@@ -31,7 +31,24 @@ export const SignedOut = () => (
   </article>
 );
 
+export const isNotBootstrapped = (error: unknown): error is ApiError =>
+  error instanceof ApiError && error.status === 503 && error.body.reason === "NotBootstrapped";
+
+export const NotBootstrapped = ({ error }: { error: ApiError }) => (
+  <article class="callout callout-warning" role="status">
+    <header>
+      <h3>bugstack is not bootstrapped</h3>
+    </header>
+    <p>
+      The Worker has no GitHub App or Slack app yet. On the machine that deploys bugstack, run{" "}
+      <code class="mono">npm run bootstrap</code>, then reload this page.
+    </p>
+    <pre class="mono">{error.body.message}</pre>
+  </article>
+);
+
 export const Failure = ({ what, error }: { what: string; error: unknown }) => {
+  if (isNotBootstrapped(error)) return <NotBootstrapped error={error} />;
   const detail = describe(error);
   const report = new URL(ISSUES);
   report.searchParams.set("title", `Admin: ${what} failed`);

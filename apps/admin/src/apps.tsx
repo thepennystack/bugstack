@@ -12,7 +12,6 @@ import {
   deleteClient,
   getApp,
   listApps,
-  listGitHubApps,
   listInstallations,
   listReports,
   listRepos,
@@ -21,7 +20,7 @@ import {
   revokeClient,
   updateApp,
 } from "./api";
-import { GITHUB_APPS, NoGitHubApp } from "./github";
+import { INSTALLATIONS, NoInstallation } from "./github";
 import { Failure } from "./notices";
 import { AppSlack } from "./slack";
 import {
@@ -112,19 +111,18 @@ export const AppList = () => {
 };
 
 type GitHubFieldsProps = {
-  githubAppId: string;
   installationId: string;
   githubRepo: string;
-  onInstallation: (githubAppId: string, installationId: string) => void;
+  onInstallation: (installationId: string) => void;
   onRepo: (value: string) => void;
 };
 
-const RepoPicker = ({ githubAppId, installationId, githubRepo, onRepo }: GitHubFieldsProps) => {
+const RepoPicker = ({ installationId, githubRepo, onRepo }: GitHubFieldsProps) => {
   const id = Number(installationId);
-  const chosen = githubAppId !== "" && installationId !== "";
+  const chosen = installationId !== "";
   const repos = useQuery({
-    queryKey: ["repos", githubAppId, id],
-    queryFn: () => listRepos(githubAppId, id),
+    queryKey: ["repos", id],
+    queryFn: () => listRepos(id),
     enabled: chosen,
   });
   if (!chosen) return null;
@@ -134,8 +132,8 @@ const RepoPicker = ({ githubAppId, installationId, githubRepo, onRepo }: GitHubF
   if (repos.data.length === 0) {
     return (
       <p class="field-note">
-        This installation grants no repositories. Add one in the GitHub App's installation settings,
-        then reload this page.
+        This installation grants no repositories. Add one in its GitHub installation settings, then
+        reload this page.
       </p>
     );
   }
@@ -159,22 +157,17 @@ const RepoPicker = ({ githubAppId, installationId, githubRepo, onRepo }: GitHubF
   );
 };
 
-const installationKey = (githubAppId: string, installationId: string): string =>
-  githubAppId === "" || installationId === "" ? "" : `${githubAppId}:${installationId}`;
-
 const GitHubFields = (props: GitHubFieldsProps) => {
-  const apps = useQuery({ queryKey: GITHUB_APPS, queryFn: listGitHubApps });
   const installations = useQuery({
-    queryKey: ["installations"],
+    queryKey: INSTALLATIONS,
     queryFn: listInstallations,
     retry: false,
   });
-  if (apps.isPending || installations.isPending) return <Loading what="GitHub installations" />;
-  if (apps.isError) return <Failure what="Loading the GitHub Apps" error={apps.error} />;
-  if (apps.data.length === 0) return <NoGitHubApp />;
+  if (installations.isPending) return <Loading what="GitHub installations" />;
   if (installations.isError) {
     return <Failure what="Loading the GitHub installations" error={installations.error} />;
   }
+  if (installations.data.length === 0) return <NoInstallation />;
   return (
     <>
       <label>
@@ -182,20 +175,16 @@ const GitHubFields = (props: GitHubFieldsProps) => {
         <select
           name="installation"
           required
-          value={installationKey(props.githubAppId, props.installationId)}
+          value={props.installationId}
           onChange={(event) => {
-            const [githubAppId = "", installationId = ""] = event.currentTarget.value.split(":");
-            props.onInstallation(githubAppId, installationId);
+            props.onInstallation(event.currentTarget.value);
             props.onRepo("");
           }}
         >
           <option value="">Choose an installation</option>
           {installations.data.map((installation) => (
-            <option
-              key={installationKey(installation.githubAppId, String(installation.installationId))}
-              value={installationKey(installation.githubAppId, String(installation.installationId))}
-            >
-              {installation.appSlug}: {installation.account}
+            <option key={installation.installationId} value={String(installation.installationId)}>
+              {installation.account}
             </option>
           ))}
         </select>
@@ -210,9 +199,8 @@ const AppForm = ({ app }: { app?: App }) => {
   const [, navigate] = useLocation();
   const [name, setName] = useState(app?.name ?? "");
   const [description, setDescription] = useState(app?.description ?? "");
-  const [githubAppId, setGithubAppId] = useState(app?.githubAppId ?? "");
   const [installationId, setInstallationId] = useState(
-    app === undefined ? "" : String(app.installationId),
+    app === undefined || app.installationId === 0 ? "" : String(app.installationId),
   );
   const [githubRepo, setGithubRepo] = useState(app?.githubRepo ?? "");
   const save = useMutation({
@@ -232,7 +220,6 @@ const AppForm = ({ app }: { app?: App }) => {
           save.mutate({
             name,
             description,
-            githubAppId,
             installationId: installationId.trim() === "" ? Number.NaN : Number(installationId),
             githubRepo,
           });
@@ -259,13 +246,9 @@ const AppForm = ({ app }: { app?: App }) => {
           />
         </label>
         <GitHubFields
-          githubAppId={githubAppId}
           installationId={installationId}
           githubRepo={githubRepo}
-          onInstallation={(nextApp, nextInstallation) => {
-            setGithubAppId(nextApp);
-            setInstallationId(nextInstallation);
-          }}
+          onInstallation={setInstallationId}
           onRepo={setGithubRepo}
         />
         {save.isError && <Failure what="Saving the app" error={save.error} />}
@@ -706,8 +689,8 @@ const AppFacts = ({ app }: { app: App }) => (
     <div>
       <dt>Installation</dt>
       <dd>
-        {app.githubAppId === "" ? (
-          <span class="muted">No GitHub App picked</span>
+        {app.installationId === 0 ? (
+          <span class="muted">No installation picked</span>
         ) : (
           <span class="mono">{app.installationId}</span>
         )}
