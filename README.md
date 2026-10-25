@@ -42,11 +42,12 @@ To attach screenshots, declare them in the report as `images: [{contentType, siz
 
 ## Setup
 
-Workers Builds is connected to the repo and deploys `main`. GitHub holds no Cloudflare token. On a fresh account, three one-time steps:
+Workers Builds is connected to the repo and deploys `main`. GitHub holds no Cloudflare token. On a fresh account, four one-time steps:
 
 1. Connect Workers Builds: under the Worker's Settings, Builds, set root `/`, build `npm run build && npm run build:worker` and deploy `npm run deploy`, turn non-production builds off, and give the build token D1 Edit.
-2. Run `npm run bootstrap` once and follow the two pages: it creates the GitHub App and the Slack app and stores their credentials as Worker secrets. Then install the GitHub App on each account bugstack files into.
-3. Open the admin Slack page, click Add to Slack and approve the workspace. Run `/invite @bugstack` in each channel.
+2. Run `npm run bootstrap` once and follow the two pages: it creates the GitHub App and the Slack app and stores their credentials as Worker secrets. The admin GitHub and Slack pages only install them.
+3. Open the admin GitHub page, click Install, and pick the accounts and repositories bugstack files into. On each app, pick the installation and repository.
+4. Open the admin Slack page, click Add to Slack and approve the workspace. Run `/invite @bugstack` in each channel.
 
 ## Health
 
