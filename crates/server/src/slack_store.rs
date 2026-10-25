@@ -48,6 +48,8 @@ pub struct Workspace {
     pub team_id: String,
     #[serde(alias = "team_name")]
     pub team_name: String,
+    #[serde(alias = "slack_app_id")]
+    pub slack_app_id: String,
     #[serde(alias = "slack_app_name")]
     pub slack_app_name: String,
     #[serde(alias = "created_at")]
@@ -64,7 +66,7 @@ pub struct Installed<'a> {
 const SLACK_APP_SELECT: &str = "SELECT slack_app_id, name, client_id, created_at FROM slack_app";
 
 const WORKSPACE_SELECT: &str = "SELECT w.workspace_id, w.team_id, w.team_name, \
-     a.name AS slack_app_name, w.created_at \
+     w.slack_app_id, a.name AS slack_app_name, w.created_at \
      FROM slack_workspace w JOIN slack_app a ON a.slack_app_id = w.slack_app_id";
 
 pub async fn list_slack_apps(db: &D1Database) -> Result<Vec<SlackApp>> {
