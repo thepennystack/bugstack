@@ -57,16 +57,33 @@ const api = async (origin, method, path, body) => {
   return { status: response.status, body: await json(response) };
 };
 
-const findOrCreateApp = async (origin, wanted) => {
+const appsNamed = async (origin, name) => {
   const list = await api(origin, "GET", "/api/apps");
   check(
     `${origin} GET /api/apps lists apps`,
     list.status === 200 && Array.isArray(list.body),
     `${list.status} ${JSON.stringify(list.body)}`,
   );
-  const existing = Array.isArray(list.body)
-    ? list.body.find((app) => app.name === wanted.name)
-    : undefined;
+  if (list.status !== 200 || !Array.isArray(list.body)) {
+    throw new Error(`GET /api/apps answered ${list.status}; refusing to create ${name} blind`);
+  }
+  return list.body
+    .filter((app) => app.name === name)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.appId.localeCompare(b.appId));
+};
+
+const deleteApp = async (origin, app) => {
+  const deleted = await api(origin, "DELETE", `/api/apps/${app.appId}`);
+  check(
+    `${origin} DELETE /api/apps/${app.appId} deletes ${app.name} with 204`,
+    deleted.status === 204,
+    `${deleted.status} ${JSON.stringify(deleted.body)}`,
+  );
+};
+
+const findOrCreateApp = async (origin, wanted) => {
+  const [existing, ...duplicates] = await appsNamed(origin, wanted.name);
+  for (const duplicate of duplicates) await deleteApp(origin, duplicate);
   if (existing) return existing;
   const created = await api(origin, "POST", "/api/apps", wanted);
   check(
@@ -223,6 +240,8 @@ const smokeApi = async (origin) => {
     ["PUT", "/api/apps/0000000000000000000000000", SMOKE_APP],
     ["POST", "/api/apps/0000000000000000000000000/clients", { name: SMOKE_CLIENT }],
     ["POST", "/api/clients/0000000000000000000000000/revoke", {}],
+    ["DELETE", `/api/clients/${UNKNOWN_ID}`, undefined],
+    ["DELETE", `/api/apps/${UNKNOWN_ID}`, undefined],
     ["DELETE", `/api/github/apps/${UNKNOWN_ID}`, undefined],
     ["POST", "/api/apps", { ...SMOKE_APP, githubAppId: UNKNOWN_ID }],
   ]) {
@@ -234,9 +253,91 @@ const smokeApi = async (origin) => {
     );
   }
 
+  await smokeDeleteApp(origin, signer);
+  await tidyClients(origin, app.appId, agent, signer);
+
   smoked.appId = app.appId;
   smoked.clientId = agent.clientId;
   console.log(`smoke app ${app.appId}, client ${SMOKE_CLIENT} ${agent.clientId}`);
+};
+
+const tidyClients = async (origin, appId, agent, signer) => {
+  const active = await api(origin, "DELETE", `/api/clients/${agent.clientId}`);
+  check(
+    `${origin} DELETE /api/clients/{clientId} refuses an Active client with 409 NotRevoked`,
+    active.status === 409 && active.body.reason === "NotRevoked",
+    `${active.status} ${JSON.stringify(active.body)}`,
+  );
+  const clientsOf = async () => {
+    const detail = await api(origin, "GET", `/api/apps/${appId}`);
+    return Array.isArray(detail.body.clients) ? detail.body.clients : [];
+  };
+  const keep = new Set([agent.clientId, signer.clientId]);
+  const staleSigners = (await clientsOf()).filter(
+    (each) => each.status === "Active" && each.name === SIGNER && !keep.has(each.clientId),
+  );
+  for (const client of staleSigners) {
+    await api(origin, "POST", `/api/clients/${client.clientId}/revoke`, {});
+  }
+  const revoked = (await clientsOf()).filter((each) => each.status === "Revoked");
+  for (const client of revoked) {
+    const deleted = await api(origin, "DELETE", `/api/clients/${client.clientId}`);
+    check(
+      `${origin} DELETE /api/clients/${client.clientId} deletes revoked ${client.name} with 204`,
+      deleted.status === 204,
+      `${deleted.status} ${JSON.stringify(deleted.body)}`,
+    );
+  }
+  const left = await clientsOf();
+  check(
+    `${origin} the smoke app keeps no revoked clients`,
+    left.every((client) => client.status === "Active"),
+    JSON.stringify(left),
+  );
+};
+
+const DELETE_APP = { ...SMOKE_APP, name: "bugstack-smoke-delete" };
+
+const smokeDeleteApp = async (origin, signer) => {
+  for (const leftover of await appsNamed(origin, DELETE_APP.name)) {
+    await deleteApp(origin, leftover);
+  }
+  const created = await api(origin, "POST", "/api/apps", DELETE_APP);
+  const appId = created.body.appId;
+  const client = await api(origin, "POST", `/api/apps/${appId}/clients`, { name: SIGNER });
+  const throwaway = { appId, clientId: client.body.clientId, secret: client.body.secret };
+  const png = tinyPng();
+  const accepted = await signedPost(origin, `/v1/apps/${appId}/reports`, throwaway, {
+    title: `Smoke delete ${commit.slice(0, 7)}`,
+    images: [PNG_DECLARATION(png)],
+  });
+  const [upload] = Array.isArray(accepted.body.uploads) ? accepted.body.uploads : [];
+  const stored = await putImage(upload?.uploadUrl, "image/png", png);
+  await delivered(origin, appId, accepted.body.reportId);
+  check(
+    `${origin} a throwaway app holds a client, a report and a stored image`,
+    created.status === 201 &&
+      client.status === 201 &&
+      accepted.status === 202 &&
+      stored.status === 200,
+    `${created.status} ${client.status} ${accepted.status} ${stored.status}`,
+  );
+  if (signer.appId === appId) throw new Error("the smoke signer belongs to the throwaway app");
+  await deleteApp(origin, { appId, name: DELETE_APP.name });
+  const gone = await api(origin, "GET", `/api/apps/${appId}`);
+  const image = await fetch(`${origin}/v1/images/${upload?.imageId}`, { redirect: "manual" });
+  await image.arrayBuffer();
+  const report = await signedPost(origin, `/v1/apps/${appId}/reports`, throwaway, {
+    title: "after delete",
+  });
+  check(
+    `${origin} a deleted app answers 404, its image 404 and its client 401 UnknownClient`,
+    gone.status === 404 &&
+      image.status === 404 &&
+      report.status === 401 &&
+      report.body.reason === "UnknownClient",
+    `${gone.status} ${image.status} ${report.status} ${JSON.stringify(report.body)}`,
+  );
 };
 
 const smokeRevoked = async (origin, appId, clients) => {

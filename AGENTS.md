@@ -37,8 +37,8 @@ Routes live in `crates/server/src/routes.rs`, D1 queries in `store.rs`, GitHub A
 - `GET /api/github/apps` lists the stored GitHub Apps `[{githubAppId, appIdNumber, slug, name, ownerLogin, htmlUrl, createdAt}]`; `DELETE /api/github/apps/{githubAppId}` is 204, or 409 `InUse` while an app files through it
 - `POST /api/github/apps/state` answers 201 `{state}`, and `GET /api/github/apps/callback?code&state` finishes the manifest flow (see GitHub Apps)
 - `GET /api/github/installations` lists `[{githubAppId, installationId, account, appSlug}]` across every stored GitHub App; `GET /api/github/installations/{id}/repos?githubAppId=` lists one installation's repositories
-- `GET`/`POST /api/apps`, `GET`/`PUT /api/apps/{appId}`
-- `POST /api/apps/{appId}/clients` returns the secret once; `POST /api/clients/{clientId}/revoke`
+- `GET`/`POST /api/apps`, `GET`/`PUT /api/apps/{appId}`; `DELETE /api/apps/{appId}` is 204 and removes the app with its clients, reports, images, issue and Slack records and failures in one D1 batch, then its R2 objects (a failed R2 delete is logged); filed GitHub issues stay
+- `POST /api/apps/{appId}/clients` returns the secret once; `POST /api/clients/{clientId}/revoke`; `DELETE /api/clients/{clientId}` is 204 for a `Revoked` client, else 409 `NotRevoked`; its reports keep the id and list the client as `deleted client`
 - `GET /api/apps/{appId}/reports` returns the newest 100 reports
 - `POST /api/reports/{reportId}/retry` resets a `Failed` report and delivers it; any other status is 409 `NotFailed`
 - `GET`/`POST /api/slack/workspaces`: create takes `{name, botToken}`, runs Slack `auth.test` and answers 400 with its error on refusal; `DELETE /api/slack/workspaces/{workspaceId}` is 204, or 409 `InUse` while an app posts to it
@@ -46,7 +46,7 @@ Routes live in `crates/server/src/routes.rs`, D1 queries in `store.rs`, GitHub A
 
 An app carries `githubAppId`, the empty string until one is picked; an unknown id is 404. It also carries `counts: {clients, pending, filed, failed}`: its active clients and its reports by status. The API never returns a bot token or a GitHub App key or secret.
 
-Bad input is 400 `Invalid`, an unknown id 404 `NotFound`. A stored key that does not import is 500 `KeyInvalid`. `migrations/` holds the schema. Smoke reuses the app `bugstack-smoke` and its client `agent`; seed only through the API.
+Bad input is 400 `Invalid`, an unknown id 404 `NotFound`. A stored key that does not import is 500 `KeyInvalid`. `migrations/` holds the schema. Smoke reuses the oldest app named `bugstack-smoke` and its client `agent`, deletes any younger duplicates, and deletes its revoked clients at the end; seed only through the API.
 
 The admin app keeps its response types by hand in `apps/admin/src/api.ts`. A 401 renders the signed-out notice; any other failure renders a notice with a prefilled issue link.
 
