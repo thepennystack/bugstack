@@ -1,12 +1,70 @@
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/preact-query";
 import { render } from "preact";
+import { Link, Route, Switch } from "wouter-preact";
+import { getMe, isUnauthorized } from "./api";
+import { Failure, SignedOut } from "./notices";
+import "./style.css";
 
-const Hello = () => (
-  <main>
-    <h1>bugstack</h1>
-    <p>Hello from the bugstack admin.</p>
-  </main>
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: (failures, error) => !isUnauthorized(error) && failures < 2,
+    },
+  },
+});
+
+const Home = () => (
+  <section>
+    <h2>Home</h2>
+    <p>Apps, clients and reports arrive here.</p>
+  </section>
 );
+
+const NotFound = () => (
+  <section>
+    <h2>Not found</h2>
+    <p>
+      No page lives at this address. <Link href="/">Go home</Link>.
+    </p>
+  </section>
+);
+
+const Shell = () => {
+  const me = useQuery({ queryKey: ["me"], queryFn: getMe });
+  if (me.isError && isUnauthorized(me.error)) {
+    return (
+      <main>
+        <SignedOut />
+      </main>
+    );
+  }
+  return (
+    <>
+      <header>
+        <Link href="/" class="brand">
+          bugstack
+        </Link>
+        <span class="identity">{me.data?.email ?? (me.isPending ? "Signing in…" : "")}</span>
+      </header>
+      <main>
+        {me.isError ? (
+          <Failure what="Loading the signed-in identity" error={me.error} />
+        ) : (
+          <Switch>
+            <Route path="/" component={Home} />
+            <Route component={NotFound} />
+          </Switch>
+        )}
+      </main>
+    </>
+  );
+};
 
 const root = document.getElementById("app");
 if (!root) throw new Error("Missing #app root element in index.html");
-render(<Hello />, root);
+render(
+  <QueryClientProvider client={queryClient}>
+    <Shell />
+  </QueryClientProvider>,
+  root,
+);
