@@ -68,6 +68,7 @@ export type ReportRow = {
   issueUrl: string | null;
   slackPosted: boolean;
   lastFailure: LastFailure | null;
+  images: string[];
 };
 
 export type Workspace = {
@@ -156,7 +157,9 @@ const isReportRow: Guard<ReportRow> = (value): value is ReportRow =>
   typeof value.nextAttemptAt === "string" &&
   (value.issueUrl === null || typeof value.issueUrl === "string") &&
   typeof value.slackPosted === "boolean" &&
-  (value.lastFailure === null || isLastFailure(value.lastFailure));
+  (value.lastFailure === null || isLastFailure(value.lastFailure)) &&
+  Array.isArray(value.images) &&
+  value.images.every((image: unknown) => typeof image === "string");
 
 const isInstallation: Guard<Installation> = (value): value is Installation =>
   isRecord(value) && typeof value.installationId === "number" && typeof value.account === "string";

@@ -423,6 +423,7 @@ const Reports = ({ appId }: { appId: string }) => {
           <th>Client</th>
           <th>Issue</th>
           <th>Slack</th>
+          <th>Images</th>
           <th>Last failure</th>
           <th />
         </tr>
@@ -443,6 +444,13 @@ const Reports = ({ appId }: { appId: string }) => {
               )}
             </td>
             <td>{report.slackPosted ? "Posted" : ""}</td>
+            <td>
+              {report.images.map((imageId, index) => (
+                <a key={imageId} href={`/v1/images/${imageId}`} target="_blank" rel="noreferrer">
+                  {`Image ${index + 1} `}
+                </a>
+              ))}
+            </td>
             <td>
               <FailureCell failure={report.lastFailure} />
             </td>
