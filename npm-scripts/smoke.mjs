@@ -23,6 +23,10 @@ const SIGNER = "smoke-signer";
 const SIGNER_FILE = join(CONFIG_DIR, "smoke-client");
 const REVOKE_CLIENT = "smoke-revoke";
 const OTHER_APP = { ...SMOKE_APP, name: "bugstack-smoke-other" };
+const MAIN_ORG = "ischen";
+const OTHER_ORG = "bugstack-smoke-other-org";
+const INVITEE = "smoke-invitee@example.com";
+let ORG = "";
 const MAX_BODY = 60 * 1024;
 const SLACK_CHANNEL = process.env.BUGSTACK_SMOKE_SLACK_CHANNEL ?? "";
 const SLACK_OUTSIDE = process.env.BUGSTACK_SMOKE_SLACK_OUTSIDE ?? "general";
@@ -56,37 +60,37 @@ const api = async (origin, method, path, body) => {
   return { status: response.status, body: await json(response) };
 };
 
-const appsNamed = async (origin, name) => {
-  const list = await api(origin, "GET", "/api/apps");
+const appsNamed = async (origin, name, base = ORG) => {
+  const list = await api(origin, "GET", `${base}/apps`);
   check(
-    `${origin} GET /api/apps lists apps`,
+    `${origin} GET ${base}/apps lists apps`,
     list.status === 200 && Array.isArray(list.body),
     `${list.status} ${JSON.stringify(list.body)}`,
   );
   if (list.status !== 200 || !Array.isArray(list.body)) {
-    throw new Error(`GET /api/apps answered ${list.status}; refusing to create ${name} blind`);
+    throw new Error(`GET ${base}/apps answered ${list.status}; refusing to create ${name} blind`);
   }
   return list.body
     .filter((app) => app.name === name)
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.appId.localeCompare(b.appId));
 };
 
-const deleteApp = async (origin, app) => {
-  const deleted = await api(origin, "DELETE", `/api/apps/${app.appId}`);
+const deleteApp = async (origin, app, base = ORG) => {
+  const deleted = await api(origin, "DELETE", `${base}/apps/${app.appId}`);
   check(
-    `${origin} DELETE /api/apps/${app.appId} deletes ${app.name} with 204`,
+    `${origin} DELETE ${base}/apps/${app.appId} deletes ${app.name} with 204`,
     deleted.status === 204,
     `${deleted.status} ${JSON.stringify(deleted.body)}`,
   );
 };
 
-const findOrCreateApp = async (origin, wanted) => {
-  const [existing, ...duplicates] = await appsNamed(origin, wanted.name);
-  for (const duplicate of duplicates) await deleteApp(origin, duplicate);
+const findOrCreateApp = async (origin, wanted, base = ORG) => {
+  const [existing, ...duplicates] = await appsNamed(origin, wanted.name, base);
+  for (const duplicate of duplicates) await deleteApp(origin, duplicate, base);
   if (existing) return existing;
-  const created = await api(origin, "POST", "/api/apps", wanted);
+  const created = await api(origin, "POST", `${base}/apps`, wanted);
   check(
-    `${origin} POST /api/apps creates ${wanted.name}`,
+    `${origin} POST ${base}/apps creates ${wanted.name}`,
     created.status === 201 &&
       created.body.appId?.length === 25 &&
       created.body.githubRepo === wanted.githubRepo,
@@ -104,6 +108,14 @@ const REMOVED_ROUTES = [
   ["POST", "/api/slack/apps", { name: "smoke", clientId: "x", clientSecret: "x" }],
   ["DELETE", `/api/slack/apps/${UNKNOWN_ID}`],
   ["GET", `/api/slack/apps/${UNKNOWN_ID}/install`],
+  ["GET", "/api/github/app"],
+  ["GET", "/api/apps"],
+  ["POST", "/api/apps", { name: "smoke" }],
+  ["GET", `/api/apps/${UNKNOWN_ID}`],
+  ["POST", `/api/reports/${UNKNOWN_ID}/retry`, {}],
+  ["GET", "/api/github/installations"],
+  ["GET", "/api/slack/workspaces"],
+  ["GET", "/api/slack/install"],
 ];
 
 const smokeRemovedRoutes = async (origin) => {
@@ -123,57 +135,62 @@ const notBootstrapped = (answer, secret) =>
   (answer.body.message ?? "").includes(secret) &&
   (answer.body.message ?? "").includes("npm run bootstrap");
 
-const githubState = async (origin) => {
-  const app = await api(origin, "GET", "/api/github/app");
-  if (app.status === 200) {
+const smokeGitHubInstall = async (origin) => {
+  const install = await api(origin, "POST", `${ORG}/github/install`, {});
+  if (install.status === 201) {
+    const url = new URL(install.body.url ?? "about:blank");
     check(
-      `${origin} GET /api/github/app answers the slug and install URL`,
-      typeof app.body.slug === "string" &&
-        app.body.slug !== "" &&
-        app.body.installUrl ===
-          `https://github.com/apps/${encodeURIComponent(app.body.slug)}/installations/new`,
-      JSON.stringify(app.body),
+      `${origin} POST {org}/github/install answers 201 with a GitHub install URL and a state`,
+      url.origin === "https://github.com" &&
+        /^\/apps\/[^/]+\/installations\/new$/.test(url.pathname) &&
+        /^[0-9a-f]{32}$/.test(url.searchParams.get("state") ?? ""),
+      JSON.stringify(install.body),
     );
   } else {
     check(
-      `${origin} GET /api/github/app answers 503 NotBootstrapped naming GITHUB_APP_SLUG`,
-      notBootstrapped(app, "GITHUB_APP_SLUG"),
-      `${app.status} ${JSON.stringify(app.body)}`,
+      `${origin} POST {org}/github/install answers 503 NotBootstrapped naming GITHUB_APP_SLUG`,
+      notBootstrapped(install, "GITHUB_APP_SLUG"),
+      `${install.status} ${JSON.stringify(install.body)}`,
     );
   }
-
-  const installations = await api(origin, "GET", "/api/github/installations");
-  if (installations.status !== 200) {
-    check(
-      `${origin} GET /api/github/installations answers 503 NotBootstrapped naming a GitHub secret`,
-      notBootstrapped(installations, "GITHUB_"),
-      `${installations.status} ${JSON.stringify(installations.body)}`,
-    );
-    console.log("skip the GitHub happy path: the GitHub App secrets are not set");
-    return undefined;
-  }
+  const forged = await api(
+    origin,
+    "GET",
+    `/api/github/setup?installation_id=1&setup_action=install&state=${randomBytes(16).toString("hex")}`,
+  );
   check(
-    `${origin} GET /api/github/installations lists the fixture app's installations`,
-    Array.isArray(installations.body) &&
+    `${origin} GET /api/github/setup with a forged state answers 400 InvalidState`,
+    forged.status === 400 && forged.body.reason === "InvalidState",
+    `${forged.status} ${JSON.stringify(forged.body)}`,
+  );
+};
+
+const githubState = async (origin) => {
+  await smokeGitHubInstall(origin);
+  const installations = await api(origin, "GET", `${ORG}/github/installations`);
+  check(
+    `${origin} GET {org}/github/installations lists the organisation's installations`,
+    installations.status === 200 &&
+      Array.isArray(installations.body) &&
       installations.body.every(
         (each) =>
           typeof each.installationId === "number" &&
           typeof each.account === "string" &&
           Object.keys(each).length === 2,
       ),
-    JSON.stringify(installations.body),
+    `${installations.status} ${JSON.stringify(installations.body)}`,
   );
   if (!Array.isArray(installations.body)) return undefined;
   const owner = SMOKE_REPO.split("/")[0];
   const installation = installations.body.find((each) => each.account === owner);
   if (installation === undefined) {
-    console.log(`skip the GitHub happy path: the GitHub App is not installed on ${owner}`);
+    console.log(`skip the GitHub happy path: the organisation has no installation on ${owner}`);
     return undefined;
   }
   const repos = await api(
     origin,
     "GET",
-    `/api/github/installations/${installation.installationId}/repos`,
+    `${ORG}/github/installations/${installation.installationId}/repos`,
   );
   check(
     `${origin} GET /api/github/installations/{id}/repos lists ${SMOKE_REPO}`,
@@ -183,27 +200,138 @@ const githubState = async (origin) => {
   return installation;
 };
 
+const orgBase = (orgId) => `/api/orgs/${orgId}`;
+
+const readMe = async (origin) => {
+  const me = await api(origin, "GET", "/api/me");
+  const orgs = Array.isArray(me.body.orgs) ? me.body.orgs : [];
+  check(
+    `${origin} GET /api/me lists ${MAIN_ORG} with the service token as Owner`,
+    me.status === 200 &&
+      me.body.identity === clientId &&
+      orgs.some((org) => org.name === MAIN_ORG && org.role === "Owner"),
+    `${me.status} ${JSON.stringify(me.body)}`,
+  );
+  return orgs;
+};
+
+const findOrCreateOrg = async (origin, orgs, name) => {
+  const existing = orgs.find((org) => org.name === name && org.role === "Owner");
+  if (existing) return existing.orgId;
+  const created = await api(origin, "POST", "/api/orgs", { name });
+  check(
+    `${origin} POST /api/orgs creates ${name} with the caller as Owner`,
+    created.status === 201 &&
+      created.body.orgId?.length === 25 &&
+      created.body.name === name &&
+      created.body.role === "Owner",
+    `${created.status} ${JSON.stringify(created.body)}`,
+  );
+  return created.body.orgId;
+};
+
+const smokeMembers = async (origin, base) => {
+  const members = async () => {
+    const list = await api(origin, "GET", `${base}/members`);
+    return Array.isArray(list.body) ? list.body : [];
+  };
+  for (const stale of (await members()).filter((each) => each.identity === INVITEE)) {
+    await api(origin, "DELETE", `${base}/members/${stale.memberId}`);
+  }
+  const invited = await api(origin, "POST", `${base}/members`, {
+    email: INVITEE.toUpperCase(),
+    role: "Member",
+  });
+  check(
+    `${origin} POST {org}/members invites ${INVITEE} with 201`,
+    invited.status === 201 &&
+      invited.body.identity === INVITEE &&
+      invited.body.role === "Member" &&
+      invited.body.memberId?.length === 25,
+    `${invited.status} ${JSON.stringify(invited.body)}`,
+  );
+  const listed = await members();
+  check(
+    `${origin} GET {org}/members lists ${INVITEE}`,
+    listed.some((each) => each.memberId === invited.body.memberId && each.identity === INVITEE),
+    JSON.stringify(listed),
+  );
+  const duplicate = await api(origin, "POST", `${base}/members`, {
+    email: INVITEE,
+    role: "Owner",
+  });
+  check(
+    `${origin} POST {org}/members refuses a second invite with 409 AlreadyMember`,
+    duplicate.status === 409 && duplicate.body.reason === "AlreadyMember",
+    `${duplicate.status} ${JSON.stringify(duplicate.body)}`,
+  );
+  const removed = await api(origin, "DELETE", `${base}/members/${invited.body.memberId}`);
+  check(
+    `${origin} DELETE {org}/members/{memberId} removes ${INVITEE} with 204`,
+    removed.status === 204,
+    `${removed.status} ${JSON.stringify(removed.body)}`,
+  );
+  const self = listed.find((each) => each.identity === clientId);
+  const lastOwner = await api(origin, "DELETE", `${base}/members/${self?.memberId}`);
+  check(
+    `${origin} DELETE {org}/members/{memberId} refuses the sole Owner with 409 LastOwner`,
+    lastOwner.status === 409 && lastOwner.body.reason === "LastOwner",
+    `${lastOwner.status} ${JSON.stringify(lastOwner.body)}`,
+  );
+};
+
+const smokeOrgs = async (origin) => {
+  const orgs = await readMe(origin);
+  const main = orgs.find((org) => org.name === MAIN_ORG && org.role === "Owner");
+  if (!main) throw new Error(`/api/me lists no ${MAIN_ORG} org; refusing to smoke blind`);
+  ORG = orgBase(main.orgId);
+  smoked.orgId = main.orgId;
+
+  const stranger = await api(origin, "GET", `${orgBase(UNKNOWN_ID)}/apps`);
+  check(
+    `${origin} GET /api/orgs/{unknown}/apps answers 403 NotAMember`,
+    stranger.status === 403 && stranger.body.reason === "NotAMember",
+    `${stranger.status} ${JSON.stringify(stranger.body)}`,
+  );
+  const blank = await api(origin, "POST", "/api/orgs", { name: "  " });
+  check(
+    `${origin} POST /api/orgs refuses a blank name with 400 Invalid`,
+    blank.status === 400 && blank.body.reason === "Invalid",
+    `${blank.status} ${JSON.stringify(blank.body)}`,
+  );
+
+  const otherBase = orgBase(await findOrCreateOrg(origin, orgs, OTHER_ORG));
+  smoked.otherBase = otherBase;
+  await smokeMembers(origin, otherBase);
+  for (const leftover of await appsNamed(origin, OTHER_APP.name)) {
+    await deleteApp(origin, leftover);
+  }
+  const other = await findOrCreateApp(origin, OTHER_APP, otherBase);
+  return { otherBase, other };
+};
+
 const smokeApi = async (origin) => {
+  const { otherBase, other } = await smokeOrgs(origin);
   await smokeRemovedRoutes(origin);
   const installation = await githubState(origin);
   const installationId = installation?.installationId;
   const appInput = { ...SMOKE_APP, installationId: installationId ?? 0 };
   const app = await findOrCreateApp(origin, appInput);
-  const listed = await api(origin, "GET", "/api/apps");
+  const listed = await api(origin, "GET", `${ORG}/apps`);
   check(
     `${origin} GET /api/apps returns ${app.appId}`,
     listed.status === 200 && listed.body.some((each) => each.appId === app.appId),
     `${listed.status} ${JSON.stringify(listed.body)}`,
   );
 
-  const put = await api(origin, "PUT", `/api/apps/${app.appId}`, appInput);
+  const put = await api(origin, "PUT", `${ORG}/apps/${app.appId}`, appInput);
   check(
     `${origin} PUT /api/apps/${app.appId} saves the app`,
     put.status === 200 && put.body.appId === app.appId && put.body.name === SMOKE_APP.name,
     `${put.status} ${JSON.stringify(put.body)}`,
   );
 
-  const detail = await api(origin, "GET", `/api/apps/${app.appId}`);
+  const detail = await api(origin, "GET", `${ORG}/apps/${app.appId}`);
   check(
     `${origin} GET /api/apps/${app.appId} returns the app and its clients`,
     detail.status === 200 &&
@@ -220,7 +348,7 @@ const smokeApi = async (origin) => {
 
   let agent = clients.find((client) => client.name === SMOKE_CLIENT && client.status === "Active");
   if (!agent) {
-    const created = await api(origin, "POST", `/api/apps/${app.appId}/clients`, {
+    const created = await api(origin, "POST", `${ORG}/apps/${app.appId}/clients`, {
       name: SMOKE_CLIENT,
     });
     check(
@@ -235,7 +363,6 @@ const smokeApi = async (origin) => {
 
   const revokedClient = await smokeRevoked(origin, app.appId, clients);
   const signer = await smokeSigner(origin, app.appId, clients);
-  const other = await findOrCreateApp(origin, OTHER_APP);
   smoked.reportTitle = await smokeReports(
     origin,
     app.appId,
@@ -248,13 +375,37 @@ const smokeApi = async (origin) => {
   await smokeUploads(origin, app.appId, signer, installationId !== undefined);
   await smokeSlack(origin, app.appId, other.appId, signer, installationId !== undefined);
 
+  for (const [method, path, body] of [
+    ["GET", `/apps/${app.appId}`, undefined],
+    ["GET", `/apps/${app.appId}/reports`, undefined],
+    ["PUT", `/apps/${app.appId}`, SMOKE_APP],
+    ["POST", `/clients/${agent.clientId}/revoke`, {}],
+  ]) {
+    const hidden = await api(origin, method, `${otherBase}${path}`, body);
+    check(
+      `${origin} ${method} ${path} of the first org answers 404 from ${OTHER_ORG}`,
+      hidden.status === 404 && hidden.body.reason === "NotFound",
+      `${hidden.status} ${JSON.stringify(hidden.body)}`,
+    );
+  }
+  const otherList = await api(origin, "GET", `${otherBase}/apps`);
+  check(
+    `${origin} GET {other org}/apps lists only its own apps`,
+    otherList.status === 200 &&
+      Array.isArray(otherList.body) &&
+      otherList.body.some((each) => each.appId === other.appId) &&
+      !otherList.body.some((each) => each.appId === app.appId),
+    `${otherList.status} ${JSON.stringify(otherList.body)}`,
+  );
+
   for (const [label, body] of [
     ["an empty name", { ...SMOKE_APP, name: "  " }],
     ["a bare repo", { ...SMOKE_APP, githubRepo: "bugstack" }],
     ["a negative installationId", { ...SMOKE_APP, installationId: -1 }],
+    ["an installationId outside the org", { ...SMOKE_APP, installationId: 1 }],
     ["a long description", { ...SMOKE_APP, description: "x".repeat(501) }],
   ]) {
-    const refused = await api(origin, "POST", "/api/apps", body);
+    const refused = await api(origin, "POST", `${ORG}/apps`, body);
     check(
       `${origin} POST /api/apps refuses ${label} with 400`,
       refused.status === 400 && refused.body.reason === "Invalid",
@@ -263,13 +414,13 @@ const smokeApi = async (origin) => {
   }
 
   for (const [method, path, body] of [
-    ["POST", `/api/reports/${UNKNOWN_ID}/retry`, {}],
-    ["GET", "/api/apps/0000000000000000000000000", undefined],
-    ["PUT", "/api/apps/0000000000000000000000000", SMOKE_APP],
-    ["POST", "/api/apps/0000000000000000000000000/clients", { name: SMOKE_CLIENT }],
-    ["POST", "/api/clients/0000000000000000000000000/revoke", {}],
-    ["DELETE", `/api/clients/${UNKNOWN_ID}`, undefined],
-    ["DELETE", `/api/apps/${UNKNOWN_ID}`, undefined],
+    ["POST", `${ORG}/reports/${UNKNOWN_ID}/retry`, {}],
+    ["GET", `${ORG}/apps/0000000000000000000000000`, undefined],
+    ["PUT", `${ORG}/apps/0000000000000000000000000`, SMOKE_APP],
+    ["POST", `${ORG}/apps/0000000000000000000000000/clients`, { name: SMOKE_CLIENT }],
+    ["POST", `${ORG}/clients/0000000000000000000000000/revoke`, {}],
+    ["DELETE", `${ORG}/clients/${UNKNOWN_ID}`, undefined],
+    ["DELETE", `${ORG}/apps/${UNKNOWN_ID}`, undefined],
   ]) {
     const missing = await api(origin, method, path, body);
     check(
@@ -288,14 +439,14 @@ const smokeApi = async (origin) => {
 };
 
 const tidyClients = async (origin, appId, agent, signer) => {
-  const active = await api(origin, "DELETE", `/api/clients/${agent.clientId}`);
+  const active = await api(origin, "DELETE", `${ORG}/clients/${agent.clientId}`);
   check(
     `${origin} DELETE /api/clients/{clientId} refuses an Active client with 409 NotRevoked`,
     active.status === 409 && active.body.reason === "NotRevoked",
     `${active.status} ${JSON.stringify(active.body)}`,
   );
   const clientsOf = async () => {
-    const detail = await api(origin, "GET", `/api/apps/${appId}`);
+    const detail = await api(origin, "GET", `${ORG}/apps/${appId}`);
     return Array.isArray(detail.body.clients) ? detail.body.clients : [];
   };
   const keep = new Set([agent.clientId, signer.clientId]);
@@ -303,11 +454,11 @@ const tidyClients = async (origin, appId, agent, signer) => {
     (each) => each.status === "Active" && each.name === SIGNER && !keep.has(each.clientId),
   );
   for (const client of staleSigners) {
-    await api(origin, "POST", `/api/clients/${client.clientId}/revoke`, {});
+    await api(origin, "POST", `${ORG}/clients/${client.clientId}/revoke`, {});
   }
   const revoked = (await clientsOf()).filter((each) => each.status === "Revoked");
   for (const client of revoked) {
-    const deleted = await api(origin, "DELETE", `/api/clients/${client.clientId}`);
+    const deleted = await api(origin, "DELETE", `${ORG}/clients/${client.clientId}`);
     check(
       `${origin} DELETE /api/clients/${client.clientId} deletes revoked ${client.name} with 204`,
       deleted.status === 204,
@@ -328,9 +479,9 @@ const smokeDeleteApp = async (origin, signer) => {
   for (const leftover of await appsNamed(origin, DELETE_APP.name)) {
     await deleteApp(origin, leftover);
   }
-  const created = await api(origin, "POST", "/api/apps", DELETE_APP);
+  const created = await api(origin, "POST", `${ORG}/apps`, DELETE_APP);
   const appId = created.body.appId;
-  const client = await api(origin, "POST", `/api/apps/${appId}/clients`, { name: SIGNER });
+  const client = await api(origin, "POST", `${ORG}/apps/${appId}/clients`, { name: SIGNER });
   const throwaway = { appId, clientId: client.body.clientId, secret: client.body.secret };
   const png = tinyPng();
   const accepted = await signedPost(origin, `/v1/apps/${appId}/reports`, throwaway, {
@@ -350,7 +501,7 @@ const smokeDeleteApp = async (origin, signer) => {
   );
   if (signer.appId === appId) throw new Error("the smoke signer belongs to the throwaway app");
   await deleteApp(origin, { appId, name: DELETE_APP.name });
-  const gone = await api(origin, "GET", `/api/apps/${appId}`);
+  const gone = await api(origin, "GET", `${ORG}/apps/${appId}`);
   const image = await fetch(`${origin}/v1/images/${upload?.imageId}`, { redirect: "manual" });
   await image.arrayBuffer();
   const report = await signedPost(origin, `/v1/apps/${appId}/reports`, throwaway, {
@@ -371,10 +522,10 @@ const smokeRevoked = async (origin, appId, clients) => {
     (client) => client.name === REVOKE_CLIENT && client.status === "Revoked",
   );
   if (existing) return existing.clientId;
-  const throwaway = await api(origin, "POST", `/api/apps/${appId}/clients`, {
+  const throwaway = await api(origin, "POST", `${ORG}/apps/${appId}/clients`, {
     name: REVOKE_CLIENT,
   });
-  const revoked = await api(origin, "POST", `/api/clients/${throwaway.body.clientId}/revoke`, {});
+  const revoked = await api(origin, "POST", `${ORG}/clients/${throwaway.body.clientId}/revoke`, {});
   check(
     `${origin} POST /api/clients/{clientId}/revoke flips the status`,
     throwaway.status === 201 &&
@@ -398,7 +549,7 @@ const smokeSigner = async (origin, appId, clients) => {
     (client) => client.clientId === saved?.clientId && client.status === "Active",
   );
   if (saved?.appId === appId && active) return saved;
-  const created = await api(origin, "POST", `/api/apps/${appId}/clients`, { name: SIGNER });
+  const created = await api(origin, "POST", `${ORG}/apps/${appId}/clients`, { name: SIGNER });
   check(
     `${origin} POST /api/apps/${appId}/clients creates ${SIGNER}`,
     created.status === 201 && typeof created.body.secret === "string",
@@ -421,7 +572,7 @@ const postReport = async (origin, appId, body, headers) => {
 };
 
 const findReport = async (origin, appId, reportId) => {
-  const reports = await api(origin, "GET", `/api/apps/${appId}/reports`);
+  const reports = await api(origin, "GET", `${ORG}/apps/${appId}/reports`);
   const row = Array.isArray(reports.body)
     ? reports.body.find((report) => report.reportId === reportId)
     : undefined;
@@ -504,7 +655,7 @@ const smokeReports = async (origin, appId, otherAppId, signer, revokedClientId, 
   if (github) checkHappyPath(origin, row);
   else checkFailurePath(origin, row);
 
-  const retried = await api(origin, "POST", `/api/reports/${accepted.body.reportId}/retry`, {});
+  const retried = await api(origin, "POST", `${ORG}/reports/${accepted.body.reportId}/retry`, {});
   check(
     `${origin} POST /api/reports/{reportId}/retry refuses a ${row?.status} report with 409 NotFailed`,
     retried.status === 409 && retried.body.reason === "NotFailed",
@@ -821,7 +972,7 @@ const closeRowIssue = (row) => {
 };
 
 const smokeSlackHappyPath = async (origin, appId, signer, workspace) => {
-  const slackPath = `/api/apps/${appId}/slack`;
+  const slackPath = `${ORG}/apps/${appId}/slack`;
   const linked = await api(origin, "PUT", slackPath, {
     workspaceId: workspace.workspaceId,
     channel: SLACK_CHANNEL,
@@ -831,7 +982,7 @@ const smokeSlackHappyPath = async (origin, appId, signer, workspace) => {
     linked.status === 204,
     `${linked.status} ${JSON.stringify(linked.body)}`,
   );
-  const inUse = await api(origin, "DELETE", `/api/slack/workspaces/${workspace.workspaceId}`);
+  const inUse = await api(origin, "DELETE", `${ORG}/slack/workspaces/${workspace.workspaceId}`);
   check(
     `${origin} DELETE a linked Slack workspace answers 409 InUse`,
     inUse.status === 409 && inUse.body.reason === "InUse",
@@ -883,7 +1034,7 @@ const smokeSlackInstall = async (origin) => {
     `${unknown.status} ${JSON.stringify(unknown.body)}`,
   );
 
-  const install = await fetch(`${origin}/api/slack/install`, {
+  const install = await fetch(`${origin}${ORG}/slack/install`, {
     redirect: "manual",
     headers: token,
   });
@@ -926,7 +1077,7 @@ const smokeSlackInstall = async (origin) => {
 };
 
 const smokeSlack = async (origin, appId, otherAppId, signer, github) => {
-  const workspaces = await api(origin, "GET", "/api/slack/workspaces");
+  const workspaces = await api(origin, "GET", `${ORG}/slack/workspaces`);
   check(
     `${origin} GET /api/slack/workspaces lists workspaces without a bot token`,
     workspaces.status === 200 &&
@@ -938,10 +1089,10 @@ const smokeSlack = async (origin, appId, otherAppId, signer, github) => {
   await smokeSlackInstall(origin);
 
   for (const [method, path, body] of [
-    ["PUT", `/api/apps/${appId}/slack`, { workspaceId: UNKNOWN_ID, channel: "bugs" }],
-    ["PUT", `/api/apps/${UNKNOWN_ID}/slack`, { workspaceId: UNKNOWN_ID, channel: "bugs" }],
-    ["DELETE", `/api/apps/${UNKNOWN_ID}/slack`, undefined],
-    ["DELETE", `/api/slack/workspaces/${UNKNOWN_ID}`, undefined],
+    ["PUT", `${ORG}/apps/${appId}/slack`, { workspaceId: UNKNOWN_ID, channel: "bugs" }],
+    ["PUT", `${ORG}/apps/${UNKNOWN_ID}/slack`, { workspaceId: UNKNOWN_ID, channel: "bugs" }],
+    ["DELETE", `${ORG}/apps/${UNKNOWN_ID}/slack`, undefined],
+    ["DELETE", `${ORG}/slack/workspaces/${UNKNOWN_ID}`, undefined],
   ]) {
     const missing = await api(origin, method, path, body);
     check(
@@ -951,7 +1102,7 @@ const smokeSlack = async (origin, appId, otherAppId, signer, github) => {
     );
   }
 
-  const blank = await api(origin, "PUT", `/api/apps/${appId}/slack`, {
+  const blank = await api(origin, "PUT", `${ORG}/apps/${appId}/slack`, {
     workspaceId: UNKNOWN_ID,
     channel: "   ",
   });
@@ -961,7 +1112,7 @@ const smokeSlack = async (origin, appId, otherAppId, signer, github) => {
     `${blank.status} ${JSON.stringify(blank.body)}`,
   );
 
-  const unlinked = await api(origin, "DELETE", `/api/apps/${otherAppId}/slack`);
+  const unlinked = await api(origin, "DELETE", `${smoked.otherBase}/apps/${otherAppId}/slack`);
   check(
     `${origin} DELETE /api/apps/{appId}/slack on an app without Slack answers 204`,
     unlinked.status === 204,
@@ -994,22 +1145,24 @@ const smokePages = async (origin) => {
       .catch((error) => String(error).split("\n")[0]);
     check(`${origin}${path} renders ${label}`, shown === "", shown);
   };
-  await visit("the app list", "/", SMOKE_APP.name);
-  await visit("the app page with its clients", `/apps/${smoked.appId}`, smoked.clientId);
-  await visit("the app page with its reports", `/apps/${smoked.appId}`, smoked.reportTitle);
+  const org = `/orgs/${smoked.orgId}`;
+  await visit("an app list from /", "/", /bugstack-smoke/);
+  await visit("the app list", `${org}/apps`, SMOKE_APP.name);
+  await visit("the app page with its clients", `${org}/apps/${smoked.appId}`, smoked.clientId);
+  await visit("the app page with its reports", `${org}/apps/${smoked.appId}`, smoked.reportTitle);
   await visit(
     "the app form with the GitHub notice or picker",
-    "/apps/new",
+    `${org}/apps/new`,
     /not installed on any GitHub account|GitHub installation|npm run bootstrap/,
   );
-  await visit("the GitHub page", "/github", "Install bugstack on a GitHub account");
-  await visit("the Slack page", "/slack", "Add bugstack to a workspace");
+  await visit("the GitHub page", `${org}/github`, "Install bugstack on a GitHub account");
+  await visit("the Slack page", `${org}/slack`, "Add bugstack to a workspace");
   await visit(
     "the app page with its Slack section",
-    `/apps/${smoked.appId}`,
+    `${org}/apps/${smoked.appId}`,
     /Reports from this app go to GitHub only|No Slack workspaces yet/,
   );
-  await visit("the edit form", `/apps/${smoked.appId}/edit`, `Edit ${SMOKE_APP.name}`);
+  await visit("the edit form", `${org}/apps/${smoked.appId}/edit`, `Edit ${SMOKE_APP.name}`);
   await browser.close();
 };
 
@@ -1068,7 +1221,7 @@ for (const origin of ORIGINS) {
   const identity = await json(me);
   check(
     `${origin}/api/me answers the service token client id`,
-    me.status === 200 && identity.email === clientId,
+    me.status === 200 && identity.identity === clientId,
     `${me.status} ${JSON.stringify(identity)}`,
   );
 
