@@ -5,7 +5,7 @@ use worker::*;
 use crate::admin::{ApiRequest, Me};
 use crate::github::{self, Credentials, GitHubError};
 use crate::slack::{self, SlackError};
-use crate::store::{self, AppInput, Client, GitHubAppKey, NewGitHubApp, Removal};
+use crate::store::{self, AppInput, Client, ClientRemoval, GitHubAppKey, NewGitHubApp, Removal};
 use crate::{deliver, refuse};
 
 const NAME_MAX: usize = 80;
@@ -336,6 +336,36 @@ async fn revoke_client(db: &D1Database, client_id: &str) -> Result<Response> {
     }
 }
 
+async fn delete_client(db: &D1Database, client_id: &str) -> Result<Response> {
+    match store::delete_client(db, client_id).await? {
+        ClientRemoval::Removed => no_content(),
+        ClientRemoval::Missing => not_found("client", client_id),
+        ClientRemoval::NotRevoked(status) => refuse(
+            409,
+            "NotRevoked",
+            &format!("client {client_id} is {status}; revoke it before deleting it"),
+        ),
+    }
+}
+
+const R2_DELETE_MAX: usize = 1000;
+
+async fn delete_app(env: &Env, app_id: &str) -> Result<Response> {
+    let Some(image_ids) = store::delete_app(&env.d1("DB")?, app_id).await? else {
+        return not_found("app", app_id);
+    };
+    let bucket = env.bucket("IMAGES")?;
+    for chunk in image_ids.chunks(R2_DELETE_MAX) {
+        if let Err(error) = bucket.delete_multiple(chunk.to_vec()).await {
+            console_error!(
+                "deleting {} image(s) of app {app_id} from R2 failed: {error}",
+                chunk.len()
+            );
+        }
+    }
+    no_content()
+}
+
 async fn list_reports(db: &D1Database, app_id: &str) -> Result<Response> {
     if store::get_app(db, app_id).await?.is_none() {
         return not_found("app", app_id);
@@ -462,6 +492,8 @@ pub async fn route(request: ApiRequest, env: &Env, ctx: &Context) -> Result<Resp
         (Method::Post, ["apps"]) => create_app(&env.d1("DB")?, body).await,
         (Method::Get, ["apps", app_id]) => get_app(&env.d1("DB")?, app_id).await,
         (Method::Put, ["apps", app_id]) => put_app(&env.d1("DB")?, app_id, body).await,
+        (Method::Delete, ["apps", app_id]) => delete_app(env, app_id).await,
+        (Method::Delete, ["clients", client_id]) => delete_client(&env.d1("DB")?, client_id).await,
         (Method::Get, ["apps", app_id, "reports"]) => list_reports(&env.d1("DB")?, app_id).await,
         (Method::Post, ["apps", app_id, "clients"]) => {
             create_client(&env.d1("DB")?, app_id, body).await

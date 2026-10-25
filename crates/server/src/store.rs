@@ -251,6 +251,71 @@ pub async fn revoke_client(db: &D1Database, client_id: &str) -> Result<Option<Cl
     get_client(db, client_id).await
 }
 
+#[derive(Deserialize)]
+struct ClientId {
+    #[serde(rename = "client_id")]
+    _client_id: String,
+}
+
+pub enum ClientRemoval {
+    Removed,
+    Missing,
+    NotRevoked(String),
+}
+
+pub async fn delete_client(db: &D1Database, client_id: &str) -> Result<ClientRemoval> {
+    let deleted: Option<ClientId> = db
+        .prepare(
+            "DELETE FROM client WHERE client_id = ?1 AND status = 'Revoked' RETURNING client_id",
+        )
+        .bind(&[text(client_id)])?
+        .first(None)
+        .await?;
+    if deleted.is_some() {
+        return Ok(ClientRemoval::Removed);
+    }
+    Ok(match get_client(db, client_id).await? {
+        Some(client) => ClientRemoval::NotRevoked(client.status),
+        None => ClientRemoval::Missing,
+    })
+}
+
+#[derive(Deserialize)]
+struct ImageId {
+    image_id: String,
+}
+
+const APP_REPORTS: &str = "SELECT report_id FROM report WHERE app_id = ?1";
+
+pub async fn delete_app(db: &D1Database, app_id: &str) -> Result<Option<Vec<String>>> {
+    if get_app(db, app_id).await?.is_none() {
+        return Ok(None);
+    }
+    let images: Vec<ImageId> = db
+        .prepare(format!(
+            "SELECT image_id FROM image WHERE report_id IN ({APP_REPORTS})"
+        ))
+        .bind(&[text(app_id)])?
+        .all()
+        .await?
+        .results()?;
+    let statements = [
+        format!("DELETE FROM image WHERE report_id IN ({APP_REPORTS})"),
+        format!("DELETE FROM github_issue WHERE report_id IN ({APP_REPORTS})"),
+        format!("DELETE FROM slack_post WHERE report_id IN ({APP_REPORTS})"),
+        format!("DELETE FROM failure WHERE report_id IN ({APP_REPORTS})"),
+        "DELETE FROM report WHERE app_id = ?1".into(),
+        "DELETE FROM client WHERE app_id = ?1".into(),
+        "DELETE FROM slack_channel WHERE app_id = ?1".into(),
+        "DELETE FROM app WHERE app_id = ?1".into(),
+    ]
+    .into_iter()
+    .map(|sql| db.prepare(sql).bind(&[text(app_id)]))
+    .collect::<Result<Vec<_>>>()?;
+    db.batch(statements).await?;
+    Ok(Some(images.into_iter().map(|row| row.image_id).collect()))
+}
+
 pub async fn signing_client(db: &D1Database, client_id: &str) -> Result<Option<SigningClient>> {
     db.prepare("SELECT app_id, status, secret FROM client WHERE client_id = ?1")
         .bind(&[text(client_id)])?
@@ -351,6 +416,7 @@ struct ReportRecord {
     status: String,
     attempts: u32,
     received_at: String,
+    #[serde(deserialize_with = "client_name")]
     client_name: String,
     next_attempt_at: String,
     issue_url: Option<String>,
@@ -395,13 +461,21 @@ fn json_ids<'de, D: Deserializer<'de>>(
     serde_json::from_str(&raw).map_err(serde::de::Error::custom)
 }
 
+const DELETED_CLIENT: &str = "deleted client";
+
+fn client_name<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_else(|| DELETED_CLIENT.into()))
+}
+
 const REPORT_SELECT: &str = "SELECT r.report_id, r.title, r.status, r.attempts, r.received_at, \
      c.name AS client_name, r.next_attempt_at, g.url AS issue_url, \
      (p.report_id IS NOT NULL) AS slack_posted, f.failed_at, f.step, f.message, \
      (SELECT json_group_array(image_id) FROM (SELECT image_id FROM image \
      WHERE report_id = r.report_id AND status = 'Stored' ORDER BY position)) AS images \
      FROM report r \
-     JOIN client c ON c.client_id = r.client_id \
+     LEFT JOIN client c ON c.client_id = r.client_id \
      LEFT JOIN github_issue g ON g.report_id = r.report_id \
      LEFT JOIN slack_post p ON p.report_id = r.report_id \
      LEFT JOIN failure f ON f.report_id = r.report_id AND f.failed_at = \
@@ -452,6 +526,7 @@ pub struct Delivery {
     pub title: String,
     pub payload: String,
     pub received_at: String,
+    #[serde(deserialize_with = "client_name")]
     pub client_name: String,
     pub github_installation_id: u64,
     pub github_repo: String,
@@ -479,7 +554,7 @@ pub async fn delivery(db: &D1Database, report_id: &str) -> Result<Delivery> {
              (SELECT json_group_array(image_id) FROM (SELECT image_id FROM image \
              WHERE report_id = r.report_id AND status = 'Stored' ORDER BY position)) AS images \
              FROM report r \
-             JOIN client c ON c.client_id = r.client_id \
+             LEFT JOIN client c ON c.client_id = r.client_id \
              JOIN app a ON a.app_id = r.app_id \
              LEFT JOIN github_app h ON h.github_app_id = a.github_app_id \
              LEFT JOIN github_issue g ON g.report_id = r.report_id \
