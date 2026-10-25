@@ -7,10 +7,7 @@ import { cloudflareEnv } from "./env.mjs";
 const ADMIN_EMAIL = "matthijs@ischen.nl";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const env =
-  process.env.CLOUDFLARE_API_TOKEN && process.env.CLOUDFLARE_ACCOUNT_ID
-    ? process.env
-    : cloudflareEnv();
+const env = process.env.WORKERS_CI ? process.env : cloudflareEnv();
 const vars = JSON.parse(readFileSync(join(root, "infra", "access.json"), "utf8"));
 const value = (name) => {
   if (!vars[name]) {
