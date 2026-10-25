@@ -8,6 +8,7 @@ pub mod routes;
 pub mod sign;
 pub mod slack;
 pub mod store;
+pub mod uploads;
 
 use serde_json::json;
 use worker::*;
@@ -33,10 +34,10 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     stamp_commit(route(req, &env, &ctx).await?)
 }
 
-fn report_app(path: &str) -> Option<&str> {
-    path.strip_prefix("/v1/apps/")?
-        .strip_suffix("/reports")
-        .filter(|app_id| !app_id.is_empty() && !app_id.contains('/'))
+fn segment<'a>(path: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
+    path.strip_prefix(prefix)?
+        .strip_suffix(suffix)
+        .filter(|id| !id.is_empty() && !id.contains('/'))
 }
 
 async fn route(req: Request, env: &Env, ctx: &Context) -> Result<Response> {
@@ -44,20 +45,35 @@ async fn route(req: Request, env: &Env, ctx: &Context) -> Result<Response> {
     if url.path().starts_with("/api/") {
         return admin::handle(req, env, ctx).await;
     }
-    if req.method() == Method::Post
-        && let Some(app_id) = report_app(url.path())
+    let path = url.path();
+    let method = req.method();
+    if method == Method::Post
+        && let Some(app_id) = segment(path, "/v1/apps/", "/reports")
     {
-        let app_id = app_id.to_string();
-        return ingest::handle(req, env, ctx, &app_id).await;
+        return ingest::handle(req, env, ctx, app_id).await;
     }
-    if req.method() == Method::Get && url.path() == "/v1/health" {
+    if method == Method::Post
+        && let Some(app_id) = segment(path, "/v1/apps/", "/uploads")
+    {
+        return uploads::reserve(req, env, app_id).await;
+    }
+    if let Some(image_id) = segment(path, "/v1/uploads/", "") {
+        if method == Method::Options {
+            return uploads::preflight();
+        }
+        if method == Method::Put {
+            return uploads::upload(req, env, image_id).await;
+        }
+    }
+    if method == Method::Get
+        && let Some(image_id) = segment(path, "/v1/images/", "")
+    {
+        return uploads::image(env, image_id).await;
+    }
+    if method == Method::Get && path == "/v1/health" {
         return Response::from_json(&json!({ "commit": COMMIT }));
     }
-    refuse(
-        404,
-        "NotFound",
-        &format!("no route for {} {}", req.method(), url.path()),
-    )
+    refuse(404, "NotFound", &format!("no route for {method} {path}"))
 }
 
 #[event(scheduled)]

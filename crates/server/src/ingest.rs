@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::Serialize;
 use serde_json::Value;
 use worker::*;
@@ -8,11 +10,17 @@ use crate::{deliver, refuse};
 
 const MAX_BODY: usize = 60 * 1024;
 const TITLE_MAX: usize = 200;
+const IMAGES_MAX: usize = 10;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Accepted {
     report_id: String,
+}
+
+pub struct Signed {
+    pub body: Vec<u8>,
+    pub client_id: String,
 }
 
 const MISSING: (&str, &str) = (
@@ -39,6 +47,41 @@ fn rejection(verdict: Verdict) -> Option<(&'static str, &'static str)> {
     }
 }
 
+pub async fn authenticate(
+    req: &mut Request,
+    db: &D1Database,
+    app_id: &str,
+) -> Result<std::result::Result<Signed, Response>> {
+    let body = req.bytes().await?;
+    if body.len() > MAX_BODY {
+        return refuse(
+            413,
+            "TooLarge",
+            &format!(
+                "the request is {} bytes; the limit is {MAX_BODY}",
+                body.len()
+            ),
+        )
+        .map(Err);
+    }
+    let headers = req.headers();
+    let Some(client_id) = headers.get(sign::CLIENT_HEADER)? else {
+        return refuse(401, MISSING.0, MISSING.1).map(Err);
+    };
+    let client = store::signing_client(db, &client_id).await?;
+    let verdict = sign::verify(
+        sign::secret_for(client.as_ref(), app_id),
+        headers.get(sign::TIMESTAMP_HEADER)?.as_deref(),
+        &body,
+        headers.get(sign::SIGNATURE_HEADER)?.as_deref(),
+        (Date::now().as_millis() / 1000) as i64,
+    );
+    if let Some((reason, message)) = rejection(verdict) {
+        return refuse(401, reason, message).map(Err);
+    }
+    Ok(Ok(Signed { body, client_id }))
+}
+
 fn invalid(message: &str) -> Result<Response> {
     refuse(400, "InvalidReport", message)
 }
@@ -60,34 +103,68 @@ fn title(report: &Value) -> std::result::Result<String, String> {
     Ok(title.to_string())
 }
 
-pub async fn handle(mut req: Request, env: &Env, ctx: &Context, app_id: &str) -> Result<Response> {
-    let body = req.bytes().await?;
-    if body.len() > MAX_BODY {
-        return refuse(
-            413,
-            "TooLarge",
-            &format!(
-                "the report is {} bytes; the limit is {MAX_BODY}",
-                body.len()
-            ),
-        );
-    }
-    let headers = req.headers();
-    let Some(client_id) = headers.get(sign::CLIENT_HEADER)? else {
-        return refuse(401, MISSING.0, MISSING.1);
+fn image_ids(report: &Value) -> std::result::Result<Vec<String>, String> {
+    let Some(images) = report.get("images") else {
+        return Ok(Vec::new());
     };
-    let db = env.d1("DB")?;
-    let client = store::signing_client(&db, &client_id).await?;
-    let verdict = sign::verify(
-        sign::secret_for(client.as_ref(), app_id),
-        headers.get(sign::TIMESTAMP_HEADER)?.as_deref(),
-        &body,
-        headers.get(sign::SIGNATURE_HEADER)?.as_deref(),
-        (Date::now().as_millis() / 1000) as i64,
-    );
-    if let Some((reason, message)) = rejection(verdict) {
-        return refuse(401, reason, message);
+    let Some(images) = images.as_array() else {
+        return Err("images must be an array of image ids".into());
+    };
+    if images.len() > IMAGES_MAX {
+        return Err(format!(
+            "images holds {} ids; the limit is {IMAGES_MAX}",
+            images.len()
+        ));
     }
+    let mut seen = HashSet::new();
+    let mut ids = Vec::with_capacity(images.len());
+    for image in images {
+        let Some(id) = image.as_str() else {
+            return Err(format!("images must hold image id strings, not {image}"));
+        };
+        if !seen.insert(id) {
+            return Err(format!("image {id} appears twice in images"));
+        }
+        ids.push(id.to_string());
+    }
+    Ok(ids)
+}
+
+async fn check_images(
+    db: &D1Database,
+    app_id: &str,
+    ids: &[String],
+) -> Result<std::result::Result<(), String>> {
+    if ids.is_empty() {
+        return Ok(Ok(()));
+    }
+    let found = store::image_states(db, ids).await?;
+    for id in ids {
+        let Some(image) = found.iter().find(|image| &image.image_id == id) else {
+            return Ok(Err(format!("image {id} does not exist")));
+        };
+        if image.app_id != app_id {
+            return Ok(Err(format!("image {id} belongs to another app")));
+        }
+        if image.status != store::STORED {
+            return Ok(Err(format!(
+                "image {id} is {}; PUT its bytes first",
+                image.status
+            )));
+        }
+        if image.linked != 0 {
+            return Ok(Err(format!("image {id} belongs to another report")));
+        }
+    }
+    Ok(Ok(()))
+}
+
+pub async fn handle(mut req: Request, env: &Env, ctx: &Context, app_id: &str) -> Result<Response> {
+    let db = env.d1("DB")?;
+    let Signed { body, client_id } = match authenticate(&mut req, &db, app_id).await? {
+        Ok(signed) => signed,
+        Err(response) => return Ok(response),
+    };
     let Ok(payload) = String::from_utf8(body) else {
         return invalid("the body must be UTF-8 JSON");
     };
@@ -99,6 +176,13 @@ pub async fn handle(mut req: Request, env: &Env, ctx: &Context, app_id: &str) ->
         Ok(title) => title,
         Err(message) => return invalid(&message),
     };
+    let images = match image_ids(&report) {
+        Ok(images) => images,
+        Err(message) => return invalid(&message),
+    };
+    if let Err(message) = check_images(&db, app_id, &images).await? {
+        return invalid(&message);
+    }
     let report_id = store::insert_report(
         &db,
         &NewReport {
@@ -106,6 +190,7 @@ pub async fn handle(mut req: Request, env: &Env, ctx: &Context, app_id: &str) ->
             client_id: &client_id,
             title: &title,
             payload: &payload,
+            images: &images,
         },
     )
     .await?;

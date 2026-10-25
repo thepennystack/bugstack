@@ -9,6 +9,7 @@ const LEASE_MINUTES: u32 = 5;
 const BACKOFF_MINUTES: [u32; 5] = [1, 5, 30, 120, 720];
 const MAX_ATTEMPTS: u32 = 6;
 const SWEEP_LIMIT: u32 = 10;
+const IMAGE_BASE: &str = "https://bugstack.kattebak.fyi/v1/images";
 
 fn fence(text: &str) -> String {
     let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
@@ -39,9 +40,20 @@ pub fn issue_body(report_id: &str, report: &Delivery) -> String {
     if let Some(body) = fields.get("body") {
         sections.push(as_text(body));
     }
+    if !report.images.is_empty() {
+        let lines: Vec<String> = report
+            .images
+            .iter()
+            .enumerate()
+            .map(|(index, image_id)| {
+                format!("![screenshot {}]({IMAGE_BASE}/{image_id})", index + 1)
+            })
+            .collect();
+        sections.push(lines.join("\n"));
+    }
     let rest: Map<String, Value> = fields
         .into_iter()
-        .filter(|(key, _)| !matches!(key.as_str(), "title" | "error" | "body"))
+        .filter(|(key, _)| !matches!(key.as_str(), "title" | "error" | "body" | "images"))
         .collect();
     if !rest.is_empty() {
         sections.push(fenced(&as_text(&Value::Object(rest)), "json"));

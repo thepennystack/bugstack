@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use wasm_bindgen::JsValue;
 use worker::{D1Database, Result};
 
@@ -233,25 +233,40 @@ pub struct NewReport<'a> {
     pub client_id: &'a str,
     pub title: &'a str,
     pub payload: &'a str,
+    pub images: &'a [String],
 }
 
 pub async fn insert_report(db: &D1Database, report: &NewReport<'_>) -> Result<String> {
     let report_id = random::id()?;
     let received_at = now();
-    db.prepare(
-        "INSERT INTO report (report_id, app_id, client_id, received_at, title, payload, status, \
-         attempts, next_attempt_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'Pending', 0, ?4)",
-    )
-    .bind(&[
-        text(&report_id),
-        text(report.app_id),
-        text(report.client_id),
-        text(&received_at),
-        text(report.title),
-        text(report.payload),
-    ])?
-    .run()
-    .await?;
+    let mut statements = vec![
+        db.prepare(
+            "INSERT INTO report (report_id, app_id, client_id, received_at, title, payload, \
+             status, attempts, next_attempt_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'Pending', 0, ?4)",
+        )
+        .bind(&[
+            text(&report_id),
+            text(report.app_id),
+            text(report.client_id),
+            text(&received_at),
+            text(report.title),
+            text(report.payload),
+        ])?,
+    ];
+    for (position, image_id) in report.images.iter().enumerate() {
+        statements.push(
+            db.prepare(
+                "INSERT INTO report_image (report_id, image_id, position) VALUES (?1, ?2, ?3)",
+            )
+            .bind(&[
+                text(&report_id),
+                text(image_id),
+                JsValue::from_f64(position as f64),
+            ])?,
+        );
+    }
+    db.batch(statements).await?;
     Ok(report_id)
 }
 
@@ -276,6 +291,7 @@ pub struct ReportRow {
     pub issue_url: Option<String>,
     pub slack_posted: bool,
     pub last_failure: Option<LastFailure>,
+    pub images: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -292,6 +308,8 @@ struct ReportRecord {
     failed_at: Option<String>,
     step: Option<String>,
     message: Option<String>,
+    #[serde(deserialize_with = "json_ids")]
+    images: Vec<String>,
 }
 
 impl From<ReportRecord> for ReportRow {
@@ -315,13 +333,23 @@ impl From<ReportRecord> for ReportRow {
             issue_url: row.issue_url,
             slack_posted: row.slack_posted != 0,
             last_failure,
+            images: row.images,
         }
     }
 }
 
+fn json_ids<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<String>, D::Error> {
+    let raw = String::deserialize(deserializer)?;
+    serde_json::from_str(&raw).map_err(serde::de::Error::custom)
+}
+
 const REPORT_SELECT: &str = "SELECT r.report_id, r.title, r.status, r.attempts, r.received_at, \
      c.name AS client_name, r.next_attempt_at, g.url AS issue_url, \
-     (p.report_id IS NOT NULL) AS slack_posted, f.failed_at, f.step, f.message \
+     (p.report_id IS NOT NULL) AS slack_posted, f.failed_at, f.step, f.message, \
+     (SELECT json_group_array(image_id) FROM (SELECT image_id FROM report_image \
+     WHERE report_id = r.report_id ORDER BY position)) AS images \
      FROM report r \
      JOIN client c ON c.client_id = r.client_id \
      LEFT JOIN github_issue g ON g.report_id = r.report_id \
@@ -382,6 +410,8 @@ pub struct Delivery {
     pub slack_channel: Option<String>,
     pub slack_token: Option<String>,
     pub slack_posted: u8,
+    #[serde(deserialize_with = "json_ids")]
+    pub images: Vec<String>,
 }
 
 pub async fn delivery(db: &D1Database, report_id: &str) -> Result<Delivery> {
@@ -390,7 +420,9 @@ pub async fn delivery(db: &D1Database, report_id: &str) -> Result<Delivery> {
             "SELECT r.title, r.payload, r.received_at, c.name AS client_name, \
              a.github_installation_id, a.github_repo, g.url AS issue_url, \
              a.name AS app_name, s.channel AS slack_channel, w.bot_token AS slack_token, \
-             (p.report_id IS NOT NULL) AS slack_posted \
+             (p.report_id IS NOT NULL) AS slack_posted, \
+             (SELECT json_group_array(image_id) FROM (SELECT image_id FROM report_image \
+             WHERE report_id = r.report_id ORDER BY position)) AS images \
              FROM report r \
              JOIN client c ON c.client_id = r.client_id \
              JOIN app a ON a.app_id = r.app_id \
@@ -591,6 +623,76 @@ pub async fn delete_app_slack(db: &D1Database, app_id: &str) -> Result<()> {
 pub async fn insert_slack_post(db: &D1Database, report_id: &str) -> Result<()> {
     db.prepare("INSERT INTO slack_post (report_id, posted_at) VALUES (?1, ?2)")
         .bind(&[text(report_id), text(&now())])?
+        .run()
+        .await?;
+    Ok(())
+}
+
+pub const STORED: &str = "Stored";
+
+#[derive(Deserialize)]
+pub struct ImageState {
+    pub image_id: String,
+    pub app_id: String,
+    pub status: String,
+    pub linked: u8,
+}
+
+pub async fn image_states(db: &D1Database, image_ids: &[String]) -> Result<Vec<ImageState>> {
+    let ids = serde_json::to_string(image_ids)?;
+    db.prepare(
+        "SELECT i.image_id, i.app_id, i.status, (l.report_id IS NOT NULL) AS linked \
+         FROM image i LEFT JOIN report_image l ON l.image_id = i.image_id \
+         WHERE i.image_id IN (SELECT value FROM json_each(?1))",
+    )
+    .bind(&[text(&ids)])?
+    .all()
+    .await?
+    .results()
+}
+
+#[derive(Deserialize)]
+pub struct Image {
+    pub content_type: String,
+    pub size: u64,
+    pub status: String,
+}
+
+pub async fn get_image(db: &D1Database, image_id: &str) -> Result<Option<Image>> {
+    db.prepare("SELECT content_type, size, status FROM image WHERE image_id = ?1")
+        .bind(&[text(image_id)])?
+        .first(None)
+        .await
+}
+
+pub async fn reserve_image(
+    db: &D1Database,
+    app_id: &str,
+    client_id: &str,
+    content_type: &str,
+    size: u64,
+) -> Result<String> {
+    let image_id = random::id()?;
+    db.prepare(
+        "INSERT INTO image (image_id, app_id, client_id, content_type, size, status, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'Reserved', ?6)",
+    )
+    .bind(&[
+        text(&image_id),
+        text(app_id),
+        text(client_id),
+        text(content_type),
+        JsValue::from_f64(size as f64),
+        text(&now()),
+    ])?
+    .run()
+    .await?;
+    Ok(image_id)
+}
+
+pub async fn set_image_stored(db: &D1Database, image_id: &str) -> Result<()> {
+    db.prepare("UPDATE image SET status = 'Stored' WHERE image_id = ?1")
+        .bind(&[text(image_id)])?
         .run()
         .await?;
     Ok(())

@@ -64,6 +64,26 @@ pub fn verify(
     }
 }
 
+fn upload_mac(secret: &str, image_id: &str, exp: &str) -> Option<Hmac<Sha256>> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).ok()?;
+    mac.update(image_id.as_bytes());
+    mac.update(b".");
+    mac.update(exp.as_bytes());
+    Some(mac)
+}
+
+pub fn upload_signature(secret: &str, image_id: &str, exp: i64) -> Option<String> {
+    let mac = upload_mac(secret, image_id, &exp.to_string())?;
+    Some(hex::encode(mac.finalize().into_bytes()))
+}
+
+pub fn upload_signed(secret: &str, image_id: &str, exp: &str, signature: &str) -> bool {
+    let Ok(expected) = hex::decode(signature) else {
+        return false;
+    };
+    upload_mac(secret, image_id, exp).is_some_and(|mac| mac.verify_slice(&expected).is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
