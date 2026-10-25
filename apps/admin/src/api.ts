@@ -312,6 +312,12 @@ export const createClient = (appId: string, name: string): Promise<CreatedClient
 export const revokeClient = (clientId: string): Promise<Client> =>
   request("POST", `/api/clients/${encodeURIComponent(clientId)}/revoke`, isClient, {});
 
+export const deleteApp = (appId: string): Promise<undefined> =>
+  request("DELETE", `/api/apps/${encodeURIComponent(appId)}`, isEmpty);
+
+export const deleteClient = (clientId: string): Promise<undefined> =>
+  request("DELETE", `/api/clients/${encodeURIComponent(clientId)}`, isEmpty);
+
 export const listReports = (appId: string): Promise<ReportRow[]> =>
   request("GET", `/api/apps/${encodeURIComponent(appId)}/reports`, listOf(isReportRow));
 

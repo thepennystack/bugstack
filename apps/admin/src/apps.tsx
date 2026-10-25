@@ -8,6 +8,8 @@ import {
   type CreatedClient,
   createApp,
   createClient,
+  deleteApp,
+  deleteClient,
   getApp,
   listApps,
   listGitHubApps,
@@ -450,6 +452,31 @@ const RevokeButton = ({ appId, clientId }: { appId: string; clientId: string }) 
   );
 };
 
+const DeleteClientButton = ({ appId, client }: { appId: string; client: Client }) => {
+  const queryClient = useQueryClient();
+  const remove = useMutation({
+    mutationFn: () => deleteClient(client.clientId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: appKey(appId) });
+      queryClient.invalidateQueries({ queryKey: [...appKey(appId), "reports"] });
+    },
+  });
+  return (
+    <>
+      <button
+        type="button"
+        class="secondary outline small"
+        aria-busy={remove.isPending}
+        disabled={remove.isPending}
+        onClick={() => remove.mutate()}
+      >
+        {remove.isPending ? "Deleting…" : "Delete"}
+      </button>
+      {remove.isError && <Failure what={`Deleting ${client.name}`} error={remove.error} />}
+    </>
+  );
+};
+
 const Clients = ({ appId, clients }: { appId: string; clients: Client[] }) => {
   const [adding, setAdding] = useState(false);
   return (
@@ -496,6 +523,9 @@ const Clients = ({ appId, clients }: { appId: string; clients: Client[] }) => {
                   <td class="cell-action">
                     {client.status === "Active" && (
                       <RevokeButton appId={appId} clientId={client.clientId} />
+                    )}
+                    {client.status === "Revoked" && (
+                      <DeleteClientButton appId={appId} client={client} />
                     )}
                   </td>
                 </tr>
@@ -702,6 +732,78 @@ const AppFacts = ({ app }: { app: App }) => (
   </dl>
 );
 
+const DangerZone = ({ app }: { app: App }) => {
+  const queryClient = useQueryClient();
+  const [, navigate] = useLocation();
+  const [confirming, setConfirming] = useState(false);
+  const [typed, setTyped] = useState("");
+  const remove = useMutation({
+    mutationFn: () => deleteApp(app.appId),
+    onSuccess: () => {
+      navigate("/");
+      queryClient.removeQueries({ queryKey: appKey(app.appId) });
+      queryClient.invalidateQueries({ queryKey: ["apps"] });
+    },
+  });
+  const cancel = () => {
+    setConfirming(false);
+    setTyped("");
+  };
+  return (
+    <section class="danger-zone">
+      <hgroup>
+        <h2>Danger zone</h2>
+        <p>
+          Deleting the app removes its clients, reports and screenshots. Issues already filed on
+          GitHub stay.
+        </p>
+      </hgroup>
+      {!confirming && (
+        <div class="actions">
+          <button type="button" class="danger" onClick={() => setConfirming(true)}>
+            Delete app
+          </button>
+        </div>
+      )}
+      {confirming && (
+        <article class="form-card">
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (typed === app.name) remove.mutate();
+            }}
+          >
+            <label>
+              Type <code class="mono">{app.name}</code> to confirm
+              <input
+                name="confirmName"
+                autoComplete="off"
+                required
+                value={typed}
+                onInput={(event) => setTyped(event.currentTarget.value)}
+              />
+            </label>
+            {remove.isError && <Failure what={`Deleting ${app.name}`} error={remove.error} />}
+            <div class="actions">
+              <button
+                type="submit"
+                class="danger"
+                aria-busy={remove.isPending}
+                disabled={typed !== app.name || remove.isPending}
+              >
+                {remove.isPending ? "Deleting…" : "Delete app"}
+              </button>
+              <button type="button" class="secondary outline" onClick={cancel}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        </article>
+      )}
+    </section>
+  );
+};
+
 export const AppPage = () => {
   const { appId = "" } = useParams<{ appId: string }>();
   const detail = useQuery({ queryKey: appKey(appId), queryFn: () => getApp(appId) });
@@ -737,6 +839,7 @@ export const AppPage = () => {
         <AppSlack app={app} />
       </section>
       <Reports appId={app.appId} />
+      <DangerZone app={app} />
     </>
   );
 };

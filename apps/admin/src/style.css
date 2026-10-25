@@ -516,6 +516,31 @@ a.button.small {
   margin-bottom: 0;
 }
 
+.danger-zone {
+  margin-top: 2.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--hairline);
+}
+
+.danger-zone h2 {
+  color: var(--callout-error);
+}
+
+button.danger {
+  background: var(--callout-error);
+  border-color: var(--callout-error);
+  color: #fff;
+}
+
+button.danger:hover:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+button.danger:focus-visible {
+  box-shadow: 0 0 0 var(--pico-outline-width)
+    color-mix(in srgb, var(--callout-error) 40%, transparent);
+}
+
 form > button[type="submit"] {
   width: auto;
 }
