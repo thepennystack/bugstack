@@ -1154,7 +1154,7 @@ const smokePages = async (origin) => {
   const visit = async (label, path, text) => {
     const shown = await page
       .goto(`${origin}${path}`)
-      .then(() => page.getByText(text).first().waitFor({ timeout: 15000 }))
+      .then(() => page.locator("main").getByText(text).first().waitFor({ timeout: 15000 }))
       .then(() => page.locator("[role=alert] h2").count())
       .then((alerts) => (alerts === 0 ? "" : "an error notice rendered"))
       .catch((error) => String(error).split("\n")[0]);
