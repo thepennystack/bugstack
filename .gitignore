@@ -1,0 +1,8 @@
+node_modules/
+dist/
+target/
+crates/server/build/
+.wrangler/
+.tmp/
+.vite/
+.dev.vars

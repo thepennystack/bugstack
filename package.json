@@ -1,0 +1,34 @@
+{
+  "name": "bugstack",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "npm run dev -w @bugstack/admin",
+    "fix": "biome check --write . && cargo fmt --all",
+    "lint": "biome check .",
+    "lint:rust": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "npm run build --workspaces --if-present",
+    "build:worker": "sh npm-scripts/build-worker.sh",
+    "deploy": "node npm-scripts/deploy.mjs",
+    "infra:plan": "node npm-scripts/infra.mjs plan",
+    "infra:apply": "node npm-scripts/infra.mjs apply",
+    "access:env": "node npm-scripts/access-env.mjs",
+    "access:lookup": "node npm-scripts/access-lookup.mjs",
+    "secret": "node npm-scripts/secret.mjs",
+    "smoke": "node npm-scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.3",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.152.0"
+  }
+}
