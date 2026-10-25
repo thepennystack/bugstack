@@ -2,39 +2,24 @@ use serde::Serialize;
 use serde_json::Value;
 use worker::*;
 
-use crate::admin::{ApiRequest, Me};
-use crate::fixtures;
-use crate::github::{self, GitHubError};
+use crate::admin::ApiRequest;
+use crate::github::GitHubError;
+use crate::org_store::{self, Membership};
 use crate::store::{self, AppInput, Client, ClientRemoval};
-use crate::{deliver, refuse, slack_routes, slack_store};
+use crate::{deliver, github_routes, org_routes, refuse, slack_routes, slack_store};
 
 const NAME_MAX: usize = 80;
 const DESCRIPTION_MAX: usize = 500;
 const OWNER_MAX: usize = 39;
 const REPO_MAX: usize = 100;
 const CHANNEL_MAX: usize = 80;
-const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
-const INSTALL_BASE: &str = "https://github.com/apps";
+pub(crate) const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppDetail {
     app: store::App,
     clients: Vec<Client>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct InstallationRow {
-    installation_id: u64,
-    account: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GitHubAppInfo {
-    slug: String,
-    install_url: String,
 }
 
 #[derive(Serialize)]
@@ -124,7 +109,7 @@ fn app_input(body: &Value) -> Checked<AppInput> {
     })
 }
 
-fn github_failure(error: GitHubError) -> Result<Response> {
+pub(crate) fn github_failure(error: GitHubError) -> Result<Response> {
     match error {
         GitHubError::KeyInvalid(message) => refuse(500, "KeyInvalid", &message),
         GitHubError::Answered {
@@ -153,102 +138,83 @@ pub(crate) fn created<T: Serialize>(value: &T) -> Result<Response> {
     Ok(Response::from_json(value)?.with_status(201))
 }
 
-fn github_app(env: &Env) -> Result<Response> {
-    let slug = match fixtures::github_slug(env) {
-        Ok(slug) => slug,
-        Err(missing) => return missing.response(),
-    };
-    let install_url = format!(
-        "{INSTALL_BASE}/{}/installations/new",
-        js_sys::encode_uri_component(&slug)
-    );
-    Response::from_json(&GitHubAppInfo { slug, install_url })
-}
-
-async fn installations(env: &Env) -> Result<Response> {
-    let fixture = match fixtures::github(env) {
-        Ok(fixture) => fixture,
-        Err(missing) => return missing.response(),
-    };
-    let all = match github::installations(&fixture.credentials()).await? {
-        Ok(all) => all,
-        Err(error) => return github_failure(error),
-    };
-    let rows: Vec<InstallationRow> = all
-        .into_iter()
-        .map(|installation| InstallationRow {
-            installation_id: installation.installation_id,
-            account: installation.account,
-        })
-        .collect();
-    Response::from_json(&rows)
-}
-
-async fn repos(env: &Env, id: &str) -> Result<Response> {
-    let Some(installation_id) = id.parse::<u64>().ok().filter(|id| *id <= MAX_SAFE_INTEGER) else {
-        return invalid(&format!(
-            "installation id must be a non-negative integer, not {id:?}"
-        ));
-    };
-    let fixture = match fixtures::github(env) {
-        Ok(fixture) => fixture,
-        Err(missing) => return missing.response(),
-    };
-    match github::repos(&fixture.credentials(), installation_id).await? {
-        Ok(all) => Response::from_json(&all),
-        Err(error) => github_failure(error),
-    }
-}
-
-async fn create_app(db: &D1Database, body: &Value) -> Result<Response> {
+async fn checked_input(
+    db: &D1Database,
+    org_id: &str,
+    body: &Value,
+) -> Result<std::result::Result<AppInput, Response>> {
     let input = match app_input(body) {
         Ok(input) => input,
-        Err(message) => return invalid(&message),
+        Err(message) => return Ok(Err(invalid(&message)?)),
     };
-    created(&store::create_app(db, &input).await?)
+    if input.installation_id != 0
+        && !org_store::has_installation(db, org_id, input.installation_id).await?
+    {
+        return Ok(Err(invalid(&format!(
+            "installationId {} is not an installation of this organisation",
+            input.installation_id
+        ))?));
+    }
+    Ok(Ok(input))
 }
 
-async fn get_app(db: &D1Database, app_id: &str) -> Result<Response> {
-    let Some(app) = store::get_app(db, app_id).await? else {
+async fn create_app(db: &D1Database, org_id: &str, body: &Value) -> Result<Response> {
+    let input = match checked_input(db, org_id, body).await? {
+        Ok(input) => input,
+        Err(response) => return Ok(response),
+    };
+    created(&store::create_app(db, org_id, &input).await?)
+}
+
+async fn get_app(db: &D1Database, org_id: &str, app_id: &str) -> Result<Response> {
+    let Some(app) = store::get_app(db, org_id, app_id).await? else {
         return not_found("app", app_id);
     };
     let clients = store::list_clients(db, app_id).await?;
     Response::from_json(&AppDetail { app, clients })
 }
 
-async fn put_app(db: &D1Database, app_id: &str, body: &Value) -> Result<Response> {
-    let input = match app_input(body) {
+async fn put_app(db: &D1Database, org_id: &str, app_id: &str, body: &Value) -> Result<Response> {
+    if store::get_app(db, org_id, app_id).await?.is_none() {
+        return not_found("app", app_id);
+    }
+    let input = match checked_input(db, org_id, body).await? {
         Ok(input) => input,
-        Err(message) => return invalid(&message),
+        Err(response) => return Ok(response),
     };
-    match store::update_app(db, app_id, &input).await? {
+    match store::update_app(db, org_id, app_id, &input).await? {
         Some(app) => Response::from_json(&app),
         None => not_found("app", app_id),
     }
 }
 
-async fn create_client(db: &D1Database, app_id: &str, body: &Value) -> Result<Response> {
+async fn create_client(
+    db: &D1Database,
+    org_id: &str,
+    app_id: &str,
+    body: &Value,
+) -> Result<Response> {
     let name = match text_field(body, "name", 1, NAME_MAX) {
         Ok(name) => name,
         Err(message) => return invalid(&message),
     };
-    if store::get_app(db, app_id).await?.is_none() {
+    if store::get_app(db, org_id, app_id).await?.is_none() {
         return not_found("app", app_id);
     }
     let secret = crate::random::secret()?;
-    let client = store::create_client(db, app_id, &name, &secret).await?;
+    let client = store::create_client(db, org_id, app_id, &name, &secret).await?;
     created(&CreatedClient { client, secret })
 }
 
-async fn revoke_client(db: &D1Database, client_id: &str) -> Result<Response> {
-    match store::revoke_client(db, client_id).await? {
+async fn revoke_client(db: &D1Database, org_id: &str, client_id: &str) -> Result<Response> {
+    match store::revoke_client(db, org_id, client_id).await? {
         Some(client) => Response::from_json(&client),
         None => not_found("client", client_id),
     }
 }
 
-async fn delete_client(db: &D1Database, client_id: &str) -> Result<Response> {
-    match store::delete_client(db, client_id).await? {
+async fn delete_client(db: &D1Database, org_id: &str, client_id: &str) -> Result<Response> {
+    match store::delete_client(db, org_id, client_id).await? {
         ClientRemoval::Removed => no_content(),
         ClientRemoval::Missing => not_found("client", client_id),
         ClientRemoval::NotRevoked(status) => refuse(
@@ -261,8 +227,8 @@ async fn delete_client(db: &D1Database, client_id: &str) -> Result<Response> {
 
 const R2_DELETE_MAX: usize = 1000;
 
-async fn delete_app(env: &Env, app_id: &str) -> Result<Response> {
-    let Some(image_ids) = store::delete_app(&env.d1("DB")?, app_id).await? else {
+async fn delete_app(env: &Env, org_id: &str, app_id: &str) -> Result<Response> {
+    let Some(image_ids) = store::delete_app(&env.d1("DB")?, org_id, app_id).await? else {
         return not_found("app", app_id);
     };
     let bucket = env.bucket("IMAGES")?;
@@ -277,17 +243,17 @@ async fn delete_app(env: &Env, app_id: &str) -> Result<Response> {
     no_content()
 }
 
-async fn list_reports(db: &D1Database, app_id: &str) -> Result<Response> {
-    if store::get_app(db, app_id).await?.is_none() {
+async fn list_reports(db: &D1Database, org_id: &str, app_id: &str) -> Result<Response> {
+    if store::get_app(db, org_id, app_id).await?.is_none() {
         return not_found("app", app_id);
     }
     Response::from_json(&store::list_reports(db, app_id).await?)
 }
 
-async fn retry(env: &Env, ctx: &Context, report_id: &str) -> Result<Response> {
+async fn retry(env: &Env, ctx: &Context, org_id: &str, report_id: &str) -> Result<Response> {
     let db = env.d1("DB")?;
-    if !store::reset_failed(&db, report_id).await? {
-        return match store::get_report(&db, report_id).await? {
+    if !store::reset_failed(&db, org_id, report_id).await? {
+        return match store::get_report(&db, org_id, report_id).await? {
             Some(report) => refuse(
                 409,
                 "NotFailed",
@@ -296,9 +262,11 @@ async fn retry(env: &Env, ctx: &Context, report_id: &str) -> Result<Response> {
             None => not_found("report", report_id),
         };
     }
-    let report = store::get_report(&db, report_id).await?.ok_or_else(|| {
-        Error::RustError(format!("report {report_id} vanished after the retry reset"))
-    })?;
+    let report = store::get_report(&db, org_id, report_id)
+        .await?
+        .ok_or_else(|| {
+            Error::RustError(format!("report {report_id} vanished after the retry reset"))
+        })?;
     deliver::in_background(ctx, env, report_id.to_string());
     Response::from_json(&report)
 }
@@ -307,7 +275,12 @@ pub(crate) fn no_content() -> Result<Response> {
     Ok(Response::empty()?.with_status(204))
 }
 
-async fn put_app_slack(db: &D1Database, app_id: &str, body: &Value) -> Result<Response> {
+async fn put_app_slack(
+    db: &D1Database,
+    org_id: &str,
+    app_id: &str,
+    body: &Value,
+) -> Result<Response> {
     let checked = text_field(body, "workspaceId", 1, NAME_MAX).and_then(|workspace_id| {
         text_field(body, "channel", 1, CHANNEL_MAX).map(|channel| (workspace_id, channel))
     });
@@ -315,10 +288,10 @@ async fn put_app_slack(db: &D1Database, app_id: &str, body: &Value) -> Result<Re
         Ok(checked) => checked,
         Err(message) => return invalid(&message),
     };
-    if store::get_app(db, app_id).await?.is_none() {
+    if store::get_app(db, org_id, app_id).await?.is_none() {
         return not_found("app", app_id);
     }
-    if slack_store::get_workspace(db, &workspace_id)
+    if slack_store::get_workspace(db, org_id, &workspace_id)
         .await?
         .is_none()
     {
@@ -328,50 +301,74 @@ async fn put_app_slack(db: &D1Database, app_id: &str, body: &Value) -> Result<Re
     no_content()
 }
 
-async fn delete_app_slack(db: &D1Database, app_id: &str) -> Result<Response> {
-    if store::get_app(db, app_id).await?.is_none() {
+async fn delete_app_slack(db: &D1Database, org_id: &str, app_id: &str) -> Result<Response> {
+    if store::get_app(db, org_id, app_id).await?.is_none() {
         return not_found("app", app_id);
     }
     store::delete_app_slack(db, app_id).await?;
     no_content()
 }
 
-pub async fn route(request: ApiRequest, env: &Env, ctx: &Context) -> Result<Response> {
-    let segments: Vec<&str> = request
-        .path
-        .trim_start_matches("/api/")
+pub(crate) fn segments(path: &str) -> Vec<&str> {
+    path.trim_start_matches("/api/")
         .trim_end_matches('/')
         .split('/')
-        .collect();
+        .collect()
+}
+
+async fn scoped(
+    request: &ApiRequest,
+    env: &Env,
+    ctx: &Context,
+    org: &Membership,
+    rest: &[&str],
+) -> Result<Response> {
+    let db = env.d1("DB")?;
+    let org_id = org.org_id.as_str();
     let body = &request.body;
-    match (&request.method, segments.as_slice()) {
-        (Method::Get, ["me"]) => Response::from_json(&Me {
-            email: request.admin.clone(),
-        }),
-        (Method::Get, ["github", "app"]) => github_app(env),
-        (Method::Get, ["github", "installations"]) => installations(env).await,
-        (Method::Get, ["github", "installations", id, "repos"]) => repos(env, id).await,
-        (Method::Get, ["apps"]) => Response::from_json(&store::list_apps(&env.d1("DB")?).await?),
-        (Method::Post, ["apps"]) => create_app(&env.d1("DB")?, body).await,
-        (Method::Get, ["apps", app_id]) => get_app(&env.d1("DB")?, app_id).await,
-        (Method::Put, ["apps", app_id]) => put_app(&env.d1("DB")?, app_id, body).await,
-        (Method::Delete, ["apps", app_id]) => delete_app(env, app_id).await,
-        (Method::Delete, ["clients", client_id]) => delete_client(&env.d1("DB")?, client_id).await,
-        (Method::Get, ["apps", app_id, "reports"]) => list_reports(&env.d1("DB")?, app_id).await,
+    match (&request.method, rest) {
+        (_, ["members", ..]) => org_routes::members(request, &db, org, &rest[1..]).await,
+        (_, ["github", ..]) => github_routes::route(request, env, org, &rest[1..]).await,
+        (_, ["slack", ..]) => slack_routes::route(request, env, org, &rest[1..]).await,
+        (Method::Get, ["apps"]) => Response::from_json(&store::list_apps(&db, org_id).await?),
+        (Method::Post, ["apps"]) => create_app(&db, org_id, body).await,
+        (Method::Get, ["apps", app_id]) => get_app(&db, org_id, app_id).await,
+        (Method::Put, ["apps", app_id]) => put_app(&db, org_id, app_id, body).await,
+        (Method::Delete, ["apps", app_id]) => delete_app(env, org_id, app_id).await,
+        (Method::Get, ["apps", app_id, "reports"]) => list_reports(&db, org_id, app_id).await,
         (Method::Post, ["apps", app_id, "clients"]) => {
-            create_client(&env.d1("DB")?, app_id, body).await
+            create_client(&db, org_id, app_id, body).await
         }
+        (Method::Put, ["apps", app_id, "slack"]) => put_app_slack(&db, org_id, app_id, body).await,
+        (Method::Delete, ["apps", app_id, "slack"]) => delete_app_slack(&db, org_id, app_id).await,
+        (Method::Delete, ["clients", client_id]) => delete_client(&db, org_id, client_id).await,
         (Method::Post, ["clients", client_id, "revoke"]) => {
-            revoke_client(&env.d1("DB")?, client_id).await
+            revoke_client(&db, org_id, client_id).await
         }
-        (_, ["slack", ..]) => slack_routes::route(&request, env).await,
-        (Method::Put, ["apps", app_id, "slack"]) => {
-            put_app_slack(&env.d1("DB")?, app_id, body).await
+        (Method::Post, ["reports", report_id, "retry"]) => retry(env, ctx, org_id, report_id).await,
+        _ => no_route(request),
+    }
+}
+
+pub async fn route(request: ApiRequest, env: &Env, ctx: &Context) -> Result<Response> {
+    let segments = segments(&request.path);
+    match (&request.method, segments.as_slice()) {
+        (Method::Get, ["me"]) => org_routes::me(&request),
+        (Method::Post, ["orgs"]) => org_routes::create_org(&request, env).await,
+        (Method::Get, ["github", "setup"]) => github_routes::setup(&request, env).await,
+        (Method::Get, ["slack", "oauth", "callback"]) => {
+            slack_routes::callback(&request, env).await
         }
-        (Method::Delete, ["apps", app_id, "slack"]) => {
-            delete_app_slack(&env.d1("DB")?, app_id).await
+        (_, ["orgs", org_id, rest @ ..]) => {
+            let Some(org) = request
+                .memberships
+                .iter()
+                .find(|membership| membership.org_id == *org_id)
+            else {
+                return org_routes::not_a_member(org_id);
+            };
+            scoped(&request, env, ctx, org, rest).await
         }
-        (Method::Post, ["reports", report_id, "retry"]) => retry(env, ctx, report_id).await,
         _ => no_route(&request),
     }
 }

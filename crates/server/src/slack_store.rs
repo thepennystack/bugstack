@@ -28,6 +28,7 @@ pub struct Workspace {
 }
 
 pub struct Installed<'a> {
+    pub org_id: &'a str,
     pub team_id: &'a str,
     pub team_name: &'a str,
     pub bot_token: &'a str,
@@ -36,12 +37,17 @@ pub struct Installed<'a> {
 const WORKSPACE_SELECT: &str =
     "SELECT workspace_id, team_id, team_name, created_at FROM slack_workspace";
 
-pub async fn issue_oauth_state(db: &D1Database, state: &str, expired: &str) -> Result<()> {
+pub async fn issue_oauth_state(
+    db: &D1Database,
+    state: &str,
+    org_id: &str,
+    expired: &str,
+) -> Result<()> {
     db.batch(vec![
         db.prepare("DELETE FROM slack_oauth_state WHERE created_at < ?1")
             .bind(&[text(expired)])?,
-        db.prepare("INSERT INTO slack_oauth_state (state, created_at) VALUES (?1, ?2)")
-            .bind(&[text(state), text(&now())])?,
+        db.prepare("INSERT INTO slack_oauth_state (state, org_id, created_at) VALUES (?1, ?2, ?3)")
+            .bind(&[text(state), text(org_id), text(&now())])?,
     ])
     .await?;
     Ok(())
@@ -49,55 +55,81 @@ pub async fn issue_oauth_state(db: &D1Database, state: &str, expired: &str) -> R
 
 #[derive(Deserialize)]
 struct StateRow {
+    org_id: String,
     created_at: String,
 }
 
-pub async fn consume_oauth_state(db: &D1Database, state: &str, expired: &str) -> Result<bool> {
+pub async fn consume_oauth_state(
+    db: &D1Database,
+    state: &str,
+    expired: &str,
+) -> Result<Option<String>> {
     let consumed: Option<StateRow> = db
-        .prepare("DELETE FROM slack_oauth_state WHERE state = ?1 RETURNING created_at")
+        .prepare("DELETE FROM slack_oauth_state WHERE state = ?1 RETURNING org_id, created_at")
         .bind(&[text(state)])?
         .first(None)
         .await?;
-    Ok(consumed.is_some_and(|row| row.created_at.as_str() >= expired))
+    Ok(consumed
+        .filter(|row| row.created_at.as_str() >= expired)
+        .map(|row| row.org_id))
 }
 
-pub async fn list_workspaces(db: &D1Database) -> Result<Vec<Workspace>> {
+pub async fn list_workspaces(db: &D1Database, org_id: &str) -> Result<Vec<Workspace>> {
     db.prepare(format!(
-        "{WORKSPACE_SELECT} ORDER BY team_name, workspace_id"
+        "{WORKSPACE_SELECT} WHERE org_id = ?1 ORDER BY team_name, workspace_id"
     ))
+    .bind(&[text(org_id)])?
     .all()
     .await?
     .results()
 }
 
-pub async fn get_workspace(db: &D1Database, workspace_id: &str) -> Result<Option<Workspace>> {
-    db.prepare(format!("{WORKSPACE_SELECT} WHERE workspace_id = ?1"))
-        .bind(&[text(workspace_id)])?
+pub async fn get_workspace(
+    db: &D1Database,
+    org_id: &str,
+    workspace_id: &str,
+) -> Result<Option<Workspace>> {
+    db.prepare(format!(
+        "{WORKSPACE_SELECT} WHERE workspace_id = ?1 AND org_id = ?2"
+    ))
+    .bind(&[text(workspace_id), text(org_id)])?
+    .first(None)
+    .await
+}
+
+#[derive(Deserialize)]
+struct OrgId {
+    org_id: String,
+}
+
+pub async fn upsert_workspace(db: &D1Database, installed: &Installed<'_>) -> Result<bool> {
+    let stored: Option<OrgId> = db
+        .prepare(
+            "INSERT INTO slack_workspace (workspace_id, org_id, team_id, team_name, bot_token, \
+             created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (team_id) DO UPDATE SET \
+             team_name = excluded.team_name, bot_token = excluded.bot_token, \
+             created_at = excluded.created_at \
+             WHERE slack_workspace.org_id = excluded.org_id RETURNING org_id",
+        )
+        .bind(&[
+            text(&random::id()?),
+            text(installed.org_id),
+            text(installed.team_id),
+            text(installed.team_name),
+            text(installed.bot_token),
+            text(&now()),
+        ])?
         .first(None)
-        .await
+        .await?;
+    Ok(stored.is_some_and(|row| row.org_id == installed.org_id))
 }
 
-pub async fn upsert_workspace(db: &D1Database, installed: &Installed<'_>) -> Result<()> {
-    db.prepare(
-        "INSERT INTO slack_workspace (workspace_id, team_id, team_name, bot_token, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (team_id) DO UPDATE SET \
-         team_name = excluded.team_name, bot_token = excluded.bot_token, \
-         created_at = excluded.created_at",
-    )
-    .bind(&[
-        text(&random::id()?),
-        text(installed.team_id),
-        text(installed.team_name),
-        text(installed.bot_token),
-        text(&now()),
-    ])?
-    .run()
-    .await?;
-    Ok(())
-}
-
-pub async fn delete_workspace(db: &D1Database, workspace_id: &str) -> Result<Removal> {
-    if get_workspace(db, workspace_id).await?.is_none() {
+pub async fn delete_workspace(
+    db: &D1Database,
+    org_id: &str,
+    workspace_id: &str,
+) -> Result<Removal> {
+    if get_workspace(db, org_id, workspace_id).await?.is_none() {
         return Ok(Removal::Missing);
     }
     let used: Option<Count> = db

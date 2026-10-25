@@ -3,8 +3,6 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ADMIN_EMAIL = "matthijs@ischen.nl";
-
 if (!process.env.WORKERS_CI) {
   console.error("Deploys run from Workers Builds on push to main.");
   process.exit(1);
@@ -34,8 +32,4 @@ wrangler(
   `ACCESS_TEAM_DOMAIN:${value("ACCESS_TEAM_DOMAIN")}`,
   "--var",
   `ACCESS_AUD:${value("ACCESS_AUD")}`,
-  "--var",
-  `ADMIN_CLIENT_ID:${value("ADMIN_CLIENT_ID")}`,
-  "--var",
-  `ADMIN_EMAIL:${ADMIN_EMAIL}`,
 );

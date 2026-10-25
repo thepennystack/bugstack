@@ -1,11 +1,11 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use serde::Serialize;
 use serde_json::{Value, json};
 use worker::*;
 
 use crate::auth::{self, Access, AccessApp, Identity, Keys};
+use crate::org_store::{self, Membership};
 use crate::{refuse, routes};
 
 const LOCAL_ADMIN: &str = "local";
@@ -19,7 +19,8 @@ pub struct ApiRequest {
     pub method: Method,
     pub path: String,
     pub origin: String,
-    pub admin: String,
+    pub identity: String,
+    pub memberships: Vec<Membership>,
     pub body: Value,
     pub query: Vec<(String, String)>,
 }
@@ -33,13 +34,8 @@ impl ApiRequest {
     }
 }
 
-#[derive(Serialize)]
-pub struct Me {
-    pub email: String,
-}
-
 enum Caller {
-    Admin(String),
+    Known(String),
     Denied(String),
 }
 
@@ -71,20 +67,10 @@ fn var(env: &Env, name: &str) -> Result<String> {
     Ok(env.var(name)?.to_string().trim().to_string())
 }
 
-fn admit(identity: Identity, admin_email: &str, admin_client_id: &str) -> Caller {
+fn identity_of(identity: Identity) -> String {
     match identity {
-        Identity::User { email } if !admin_email.is_empty() && email == admin_email => {
-            Caller::Admin(email)
-        }
-        Identity::ServiceToken { common_name }
-            if !admin_client_id.is_empty() && common_name == admin_client_id =>
-        {
-            Caller::Admin(common_name)
-        }
-        Identity::User { email } => Caller::Denied(format!("{email} is not the admin")),
-        Identity::ServiceToken { common_name } => {
-            Caller::Denied(format!("service token {common_name} is not the admin"))
-        }
+        Identity::User { email } => email.to_lowercase(),
+        Identity::ServiceToken { common_name } => common_name,
     }
 }
 
@@ -97,7 +83,7 @@ async fn caller(req: &Request, env: &Env) -> Result<Caller> {
                 "Cloudflare Access is disabled: ACCESS_TEAM_DOMAIN and ACCESS_AUD are empty"
             );
         }
-        return Ok(Caller::Admin(LOCAL_ADMIN.into()));
+        return Ok(Caller::Known(LOCAL_ADMIN.into()));
     };
     let assertion = req.headers().get(auth::ASSERTION_HEADER)?;
     let cookie = req.headers().get("Cookie")?;
@@ -109,11 +95,7 @@ async fn caller(req: &Request, env: &Env) -> Result<Caller> {
         Ok(identity) => identity,
         Err(reason) => return Ok(Caller::Denied(reason)),
     };
-    Ok(admit(
-        identity,
-        &var(env, "ADMIN_EMAIL")?,
-        &var(env, "ADMIN_CLIENT_ID")?,
-    ))
+    Ok(Caller::Known(identity_of(identity)))
 }
 
 fn is_json(req: &Request) -> Result<bool> {
@@ -159,28 +141,26 @@ async fn body(req: &mut Request) -> Result<std::result::Result<Value, Response>>
 }
 
 pub async fn handle(mut req: Request, env: &Env, ctx: &Context) -> Result<Response> {
-    let admin = match caller(&req, env).await? {
-        Caller::Admin(admin) => admin,
+    let identity = match caller(&req, env).await? {
+        Caller::Known(identity) => identity,
         Caller::Denied(reason) => {
             console_log!("Access rejected the request: {reason}");
-            return refuse(
-                401,
-                "Unauthorized",
-                "sign in through Cloudflare Access as the bugstack admin",
-            );
+            return refuse(401, "Unauthorized", "sign in through Cloudflare Access");
         }
     };
     let body = match body(&mut req).await? {
         Ok(body) => body,
         Err(response) => return Ok(response),
     };
+    let memberships = org_store::memberships(&env.d1("DB")?, &identity).await?;
     let url = req.url()?;
     routes::route(
         ApiRequest {
             method: req.method(),
             path: url.path().to_string(),
             origin: url.origin().ascii_serialization(),
-            admin,
+            identity,
+            memberships,
             body,
             query: url
                 .query_pairs()

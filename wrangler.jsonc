@@ -28,8 +28,6 @@
   "r2_buckets": [{ "binding": "IMAGES", "bucket_name": "bugstack-images" }],
   "vars": {
     "ACCESS_TEAM_DOMAIN": "",
-    "ACCESS_AUD": "",
-    "ADMIN_CLIENT_ID": "",
-    "ADMIN_EMAIL": ""
+    "ACCESS_AUD": ""
   }
 }

@@ -237,25 +237,24 @@ async fn call<T: DeserializeOwned>(
     }
 }
 
-pub async fn installations(credentials: &Credentials<'_>) -> Result<Answer<Vec<Installation>>> {
+pub async fn installation(
+    credentials: &Credentials<'_>,
+    installation_id: u64,
+) -> Result<Answer<Installation>> {
     let jwt = match app_jwt(credentials).await? {
         Ok(jwt) => jwt,
         Err(error) => return Ok(Err(error)),
     };
-    let raw: Answer<Vec<RawInstallation>> = call(
+    let raw: Answer<RawInstallation> = call(
         Method::Get,
-        "/app/installations?per_page=100",
+        &format!("/app/installations/{installation_id}"),
         Some(&format!("Bearer {jwt}")),
         None,
     )
     .await?;
-    Ok(raw.map(|all| {
-        all.into_iter()
-            .map(|installation| Installation {
-                installation_id: installation.id,
-                account: installation.account.login,
-            })
-            .collect()
+    Ok(raw.map(|installation| Installation {
+        installation_id: installation.id,
+        account: installation.account.login,
     }))
 }
 

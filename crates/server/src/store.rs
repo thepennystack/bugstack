@@ -15,6 +15,8 @@ const APP_SELECT: &str = "SELECT a.app_id, a.name, a.description, \
 
 const CLIENT_SELECT: &str = "SELECT client_id, name, status, created_at FROM client";
 
+const IN_ORG: &str = "app_id IN (SELECT app_id FROM app WHERE org_id = ?2)";
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Slack {
@@ -135,29 +137,34 @@ fn text(value: &str) -> JsValue {
     JsValue::from_str(value)
 }
 
-pub async fn list_apps(db: &D1Database) -> Result<Vec<App>> {
+pub async fn list_apps(db: &D1Database, org_id: &str) -> Result<Vec<App>> {
     let rows: Vec<AppRow> = db
-        .prepare(format!("{APP_SELECT} ORDER BY a.created_at DESC"))
+        .prepare(format!(
+            "{APP_SELECT} WHERE a.org_id = ?1 ORDER BY a.created_at DESC"
+        ))
+        .bind(&[text(org_id)])?
         .all()
         .await?
         .results()?;
     Ok(rows.into_iter().map(App::from).collect())
 }
 
-pub async fn get_app(db: &D1Database, app_id: &str) -> Result<Option<App>> {
+pub async fn get_app(db: &D1Database, org_id: &str, app_id: &str) -> Result<Option<App>> {
     let row: Option<AppRow> = db
-        .prepare(format!("{APP_SELECT} WHERE a.app_id = ?1"))
-        .bind(&[text(app_id)])?
+        .prepare(format!(
+            "{APP_SELECT} WHERE a.app_id = ?1 AND a.org_id = ?2"
+        ))
+        .bind(&[text(app_id), text(org_id)])?
         .first(None)
         .await?;
     Ok(row.map(App::from))
 }
 
-pub async fn create_app(db: &D1Database, input: &AppInput) -> Result<App> {
+pub async fn create_app(db: &D1Database, org_id: &str, input: &AppInput) -> Result<App> {
     let app_id = random::id()?;
     db.prepare(
-        "INSERT INTO app (app_id, name, description, github_installation_id, github_repo, \
-         created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO app (app_id, org_id, name, description, github_installation_id, \
+         github_repo, created_at) VALUES (?1, ?7, ?2, ?3, ?4, ?5, ?6)",
     )
     .bind(&[
         text(&app_id),
@@ -166,18 +173,24 @@ pub async fn create_app(db: &D1Database, input: &AppInput) -> Result<App> {
         JsValue::from_f64(input.installation_id as f64),
         text(&input.github_repo),
         text(&now()),
+        text(org_id),
     ])?
     .run()
     .await?;
-    get_app(db, &app_id)
+    get_app(db, org_id, &app_id)
         .await?
         .ok_or_else(|| worker::Error::RustError(format!("app {app_id} vanished after insert")))
 }
 
-pub async fn update_app(db: &D1Database, app_id: &str, input: &AppInput) -> Result<Option<App>> {
+pub async fn update_app(
+    db: &D1Database,
+    org_id: &str,
+    app_id: &str,
+    input: &AppInput,
+) -> Result<Option<App>> {
     db.prepare(
         "UPDATE app SET name = ?2, description = ?3, github_installation_id = ?4, \
-         github_repo = ?5 WHERE app_id = ?1",
+         github_repo = ?5 WHERE app_id = ?1 AND org_id = ?6",
     )
     .bind(&[
         text(app_id),
@@ -185,10 +198,11 @@ pub async fn update_app(db: &D1Database, app_id: &str, input: &AppInput) -> Resu
         text(&input.description),
         JsValue::from_f64(input.installation_id as f64),
         text(&input.github_repo),
+        text(org_id),
     ])?
     .run()
     .await?;
-    get_app(db, app_id).await
+    get_app(db, org_id, app_id).await
 }
 
 pub async fn list_clients(db: &D1Database, app_id: &str) -> Result<Vec<Client>> {
@@ -203,10 +217,10 @@ pub async fn list_clients(db: &D1Database, app_id: &str) -> Result<Vec<Client>> 
     Ok(rows.into_iter().map(Client::from).collect())
 }
 
-pub async fn get_client(db: &D1Database, client_id: &str) -> Result<Option<Client>> {
+pub async fn get_client(db: &D1Database, org_id: &str, client_id: &str) -> Result<Option<Client>> {
     let row: Option<ClientRow> = db
-        .prepare(format!("{CLIENT_SELECT} WHERE client_id = ?1"))
-        .bind(&[text(client_id)])?
+        .prepare(format!("{CLIENT_SELECT} WHERE client_id = ?1 AND {IN_ORG}"))
+        .bind(&[text(client_id), text(org_id)])?
         .first(None)
         .await?;
     Ok(row.map(Client::from))
@@ -214,6 +228,7 @@ pub async fn get_client(db: &D1Database, client_id: &str) -> Result<Option<Clien
 
 pub async fn create_client(
     db: &D1Database,
+    org_id: &str,
     app_id: &str,
     name: &str,
     secret: &str,
@@ -232,17 +247,23 @@ pub async fn create_client(
     ])?
     .run()
     .await?;
-    get_client(db, &client_id).await?.ok_or_else(|| {
+    get_client(db, org_id, &client_id).await?.ok_or_else(|| {
         worker::Error::RustError(format!("client {client_id} vanished after insert"))
     })
 }
 
-pub async fn revoke_client(db: &D1Database, client_id: &str) -> Result<Option<Client>> {
-    db.prepare("UPDATE client SET status = 'Revoked' WHERE client_id = ?1")
-        .bind(&[text(client_id)])?
-        .run()
-        .await?;
-    get_client(db, client_id).await
+pub async fn revoke_client(
+    db: &D1Database,
+    org_id: &str,
+    client_id: &str,
+) -> Result<Option<Client>> {
+    db.prepare(format!(
+        "UPDATE client SET status = 'Revoked' WHERE client_id = ?1 AND {IN_ORG}"
+    ))
+    .bind(&[text(client_id), text(org_id)])?
+    .run()
+    .await?;
+    get_client(db, org_id, client_id).await
 }
 
 #[derive(Deserialize)]
@@ -257,18 +278,23 @@ pub enum ClientRemoval {
     NotRevoked(String),
 }
 
-pub async fn delete_client(db: &D1Database, client_id: &str) -> Result<ClientRemoval> {
+pub async fn delete_client(
+    db: &D1Database,
+    org_id: &str,
+    client_id: &str,
+) -> Result<ClientRemoval> {
     let deleted: Option<ClientId> = db
-        .prepare(
-            "DELETE FROM client WHERE client_id = ?1 AND status = 'Revoked' RETURNING client_id",
-        )
-        .bind(&[text(client_id)])?
+        .prepare(format!(
+            "DELETE FROM client WHERE client_id = ?1 AND status = 'Revoked' AND {IN_ORG} \
+             RETURNING client_id"
+        ))
+        .bind(&[text(client_id), text(org_id)])?
         .first(None)
         .await?;
     if deleted.is_some() {
         return Ok(ClientRemoval::Removed);
     }
-    Ok(match get_client(db, client_id).await? {
+    Ok(match get_client(db, org_id, client_id).await? {
         Some(client) => ClientRemoval::NotRevoked(client.status),
         None => ClientRemoval::Missing,
     })
@@ -281,8 +307,12 @@ struct ImageId {
 
 const APP_REPORTS: &str = "SELECT report_id FROM report WHERE app_id = ?1";
 
-pub async fn delete_app(db: &D1Database, app_id: &str) -> Result<Option<Vec<String>>> {
-    if get_app(db, app_id).await?.is_none() {
+pub async fn delete_app(
+    db: &D1Database,
+    org_id: &str,
+    app_id: &str,
+) -> Result<Option<Vec<String>>> {
+    if get_app(db, org_id, app_id).await?.is_none() {
         return Ok(None);
     }
     let images: Vec<ImageId> = db
@@ -488,10 +518,16 @@ pub async fn list_reports(db: &D1Database, app_id: &str) -> Result<Vec<ReportRow
     Ok(rows.into_iter().map(ReportRow::from).collect())
 }
 
-pub async fn get_report(db: &D1Database, report_id: &str) -> Result<Option<ReportRow>> {
+pub async fn get_report(
+    db: &D1Database,
+    org_id: &str,
+    report_id: &str,
+) -> Result<Option<ReportRow>> {
     let row: Option<ReportRecord> = db
-        .prepare(format!("{REPORT_SELECT} WHERE r.report_id = ?1"))
-        .bind(&[text(report_id)])?
+        .prepare(format!(
+            "{REPORT_SELECT} WHERE r.report_id = ?1 AND r.{IN_ORG}"
+        ))
+        .bind(&[text(report_id), text(org_id)])?
         .first(None)
         .await?;
     Ok(row.map(ReportRow::from))
@@ -629,13 +665,13 @@ pub async fn due_reports(db: &D1Database, limit: u32) -> Result<Vec<String>> {
     Ok(rows.into_iter().map(|row| row.report_id).collect())
 }
 
-pub async fn reset_failed(db: &D1Database, report_id: &str) -> Result<bool> {
+pub async fn reset_failed(db: &D1Database, org_id: &str, report_id: &str) -> Result<bool> {
     let reset: Option<Due> = db
-        .prepare(
-            "UPDATE report SET status = 'Pending', attempts = 0, next_attempt_at = ?2 \
-             WHERE report_id = ?1 AND status = 'Failed' RETURNING report_id",
-        )
-        .bind(&[text(report_id), text(&now())])?
+        .prepare(format!(
+            "UPDATE report SET status = 'Pending', attempts = 0, next_attempt_at = ?3 \
+             WHERE report_id = ?1 AND status = 'Failed' AND {IN_ORG} RETURNING report_id"
+        ))
+        .bind(&[text(report_id), text(org_id), text(&now())])?
         .first(None)
         .await?;
     Ok(reset.is_some())
