@@ -104,3 +104,8 @@ resource "cloudflare_zero_trust_access_application" "reports" {
     precedence = 1
   }]
 }
+
+resource "cloudflare_r2_bucket" "images" {
+  account_id = var.account_id
+  name       = "bugstack-images"
+}

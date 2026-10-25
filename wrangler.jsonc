@@ -25,6 +25,7 @@
       "migrations_dir": "migrations"
     }
   ],
+  "r2_buckets": [{ "binding": "IMAGES", "bucket_name": "bugstack-images" }],
   "vars": {
     "ACCESS_TEAM_DOMAIN": "",
     "ACCESS_AUD": "",
