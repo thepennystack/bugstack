@@ -49,6 +49,8 @@ Workers Builds is connected to the repo and deploys `main`. GitHub holds no Clou
 3. Open the admin GitHub page, click Install, and pick the accounts and repositories bugstack files into. On each app, pick the installation and repository.
 4. Open the admin Slack page, click Add to Slack and approve the workspace. Run `/invite @bugstack` in each channel.
 
+Anyone with a verified email can sign in at the admin and create an organisation. An Owner invites others by email on the Members page; no email is sent, and the invitee signs in with that address and lands in the organisation.
+
 ## Health
 
 `GET /v1/health` answers `{"commit": "<sha>"}` with the `x-bugstack-commit` header.

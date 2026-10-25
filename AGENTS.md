@@ -111,7 +111,9 @@ Run `/invite @bugstack` in each channel an app posts to; a channel without the b
 
 ## Infra
 
-`infra/` owns the D1 database, the policies `bugstack-admin`, `bugstack-automation` and `bugstack-public`, the service token, and the applications `bugstack-admin` (both hosts) and `bugstack-reports` (`<host>/v1`, bypass). stallion's state owns the Zero Trust organization and the PIN provider. After an apply, encrypt the state and `cf-env` into dotfiles with `dotfiles-key encrypt bugstack-tfstate` and `bugstack-cf-env`.
+`infra/` owns the D1 database, the policies `bugstack-admin`, `bugstack-automation` and `bugstack-public`, the service token, and the applications `bugstack-admin` (both hosts) and `bugstack-reports` (`<host>/v1`, bypass). stallion's state owns the Zero Trust organization and the PIN provider.
+
+Access: the `bugstack-admin` policy includes everyone and the application allows only the PIN provider, so anyone with a verified email can sign in and create an org; an Owner invites others by email, and the `member` rows alone decide what each identity sees. Each signed-in email takes a Zero Trust seat. After an apply, encrypt the state and `cf-env` into dotfiles with `dotfiles-key encrypt bugstack-tfstate` and `bugstack-cf-env`.
 
 ## Devbox
 
