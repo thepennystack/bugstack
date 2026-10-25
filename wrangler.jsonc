@@ -4,6 +4,7 @@
   "main": "crates/server/build/index.js",
   "compatibility_date": "2026-10-01",
   "workers_dev": true,
+  "preview_urls": false,
   "routes": [{ "pattern": "bugstack.kattebak.fyi", "custom_domain": true }],
   "build": {
     "command": "npm run build:worker"
