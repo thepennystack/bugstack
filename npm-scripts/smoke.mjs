@@ -13,7 +13,6 @@ const SMOKE_REPO = "thepennystack/bugstack";
 const SMOKE_APP = {
   name: "bugstack-smoke",
   description: "Created by npm run smoke",
-  githubAppId: "",
   installationId: 0,
   githubRepo: SMOKE_REPO,
 };
@@ -27,7 +26,6 @@ const OTHER_APP = { ...SMOKE_APP, name: "bugstack-smoke-other" };
 const MAX_BODY = 60 * 1024;
 const SLACK_CHANNEL = process.env.BUGSTACK_SMOKE_SLACK_CHANNEL ?? "";
 const SLACK_OUTSIDE = process.env.BUGSTACK_SMOKE_SLACK_OUTSIDE ?? "general";
-const DUMMY_CLIENT_ID = "0000000000.0000000000";
 const commit =
   process.argv[2] ?? execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 const token = accessHeaders();
@@ -97,70 +95,99 @@ const findOrCreateApp = async (origin, wanted) => {
   return created.body;
 };
 
-const smokeGitHubApps = async (origin) => {
-  const apps = await api(origin, "GET", "/api/github/apps");
-  check(
-    `${origin} GET /api/github/apps lists GitHub Apps without secrets`,
-    apps.status === 200 &&
-      Array.isArray(apps.body) &&
-      apps.body.every((app) => !("privateKey" in app) && !("clientSecret" in app)),
-    `${apps.status} ${JSON.stringify(apps.body)}`,
-  );
+const REMOVED_ROUTES = [
+  ["GET", "/api/github/apps"],
+  ["POST", "/api/github/apps/state", {}],
+  ["GET", `/api/github/apps/callback?code=smoke&state=${randomBytes(16).toString("hex")}`],
+  ["DELETE", `/api/github/apps/${UNKNOWN_ID}`],
+  ["GET", "/api/slack/apps"],
+  ["POST", "/api/slack/apps", { name: "smoke", clientId: "x", clientSecret: "x" }],
+  ["DELETE", `/api/slack/apps/${UNKNOWN_ID}`],
+  ["GET", `/api/slack/apps/${UNKNOWN_ID}/install`],
+];
 
-  const state = await api(origin, "POST", "/api/github/apps/state", {});
-  check(
-    `${origin} POST /api/github/apps/state answers a state`,
-    state.status === 201 && /^[0-9a-f]{32}$/.test(state.body.state ?? ""),
-    `${state.status} ${JSON.stringify(state.body)}`,
-  );
-
-  const unknown = await api(
-    origin,
-    "GET",
-    `/api/github/apps/callback?code=smoke&state=${randomBytes(16).toString("hex")}`,
-  );
-  check(
-    `${origin} GET /api/github/apps/callback with an unknown state answers 400 InvalidState`,
-    unknown.status === 400 && unknown.body.reason === "InvalidState",
-    `${unknown.status} ${JSON.stringify(unknown.body)}`,
-  );
-  return Array.isArray(apps.body) ? apps.body : [];
+const smokeRemovedRoutes = async (origin) => {
+  for (const [method, path, body] of REMOVED_ROUTES) {
+    const gone = await api(origin, method, path, body);
+    check(
+      `${origin} ${method} ${path.split("?")[0]} is gone with 404`,
+      gone.status === 404 && gone.body.reason === "NotFound",
+      `${gone.status} ${JSON.stringify(gone.body)}`,
+    );
+  }
 };
 
+const notBootstrapped = (answer, secret) =>
+  answer.status === 503 &&
+  answer.body.reason === "NotBootstrapped" &&
+  (answer.body.message ?? "").includes(secret) &&
+  (answer.body.message ?? "").includes("npm run bootstrap");
+
 const githubState = async (origin) => {
-  const apps = await smokeGitHubApps(origin);
+  const app = await api(origin, "GET", "/api/github/app");
+  if (app.status === 200) {
+    check(
+      `${origin} GET /api/github/app answers the slug and install URL`,
+      typeof app.body.slug === "string" &&
+        app.body.slug !== "" &&
+        app.body.installUrl ===
+          `https://github.com/apps/${encodeURIComponent(app.body.slug)}/installations/new`,
+      JSON.stringify(app.body),
+    );
+  } else {
+    check(
+      `${origin} GET /api/github/app answers 503 NotBootstrapped naming GITHUB_APP_SLUG`,
+      notBootstrapped(app, "GITHUB_APP_SLUG"),
+      `${app.status} ${JSON.stringify(app.body)}`,
+    );
+  }
+
   const installations = await api(origin, "GET", "/api/github/installations");
+  if (installations.status !== 200) {
+    check(
+      `${origin} GET /api/github/installations answers 503 NotBootstrapped naming a GitHub secret`,
+      notBootstrapped(installations, "GITHUB_"),
+      `${installations.status} ${JSON.stringify(installations.body)}`,
+    );
+    console.log("skip the GitHub happy path: the GitHub App secrets are not set");
+    return undefined;
+  }
   check(
-    `${origin} GET /api/github/installations lists installations across GitHub Apps`,
-    installations.status === 200 &&
-      Array.isArray(installations.body) &&
+    `${origin} GET /api/github/installations lists the fixture app's installations`,
+    Array.isArray(installations.body) &&
       installations.body.every(
         (each) =>
-          typeof each.githubAppId === "string" &&
           typeof each.installationId === "number" &&
-          typeof each.appSlug === "string",
+          typeof each.account === "string" &&
+          Object.keys(each).length === 2,
       ),
-    `${installations.status} ${JSON.stringify(installations.body)}`,
+    JSON.stringify(installations.body),
   );
-  if (apps.length === 0 || !Array.isArray(installations.body)) return undefined;
+  if (!Array.isArray(installations.body)) return undefined;
   const owner = SMOKE_REPO.split("/")[0];
   const installation = installations.body.find((each) => each.account === owner);
+  if (installation === undefined) {
+    console.log(`skip the GitHub happy path: the GitHub App is not installed on ${owner}`);
+    return undefined;
+  }
+  const repos = await api(
+    origin,
+    "GET",
+    `/api/github/installations/${installation.installationId}/repos`,
+  );
   check(
-    `${origin} a stored GitHub App is installed on ${owner}`,
-    installation !== undefined,
-    JSON.stringify(installations.body),
+    `${origin} GET /api/github/installations/{id}/repos lists ${SMOKE_REPO}`,
+    repos.status === 200 && Array.isArray(repos.body) && repos.body.includes(SMOKE_REPO),
+    `${repos.status} ${JSON.stringify(repos.body)}`,
   );
   return installation;
 };
 
 const smokeApi = async (origin) => {
+  await smokeRemovedRoutes(origin);
   const installation = await githubState(origin);
   const installationId = installation?.installationId;
-  const appInput = {
-    ...SMOKE_APP,
-    githubAppId: installation?.githubAppId ?? "",
-    installationId: installationId ?? 0,
-  };
+  const appInput = { ...SMOKE_APP, installationId: installationId ?? 0 };
   const app = await findOrCreateApp(origin, appInput);
   const listed = await api(origin, "GET", "/api/apps");
   check(
@@ -243,8 +270,6 @@ const smokeApi = async (origin) => {
     ["POST", "/api/clients/0000000000000000000000000/revoke", {}],
     ["DELETE", `/api/clients/${UNKNOWN_ID}`, undefined],
     ["DELETE", `/api/apps/${UNKNOWN_ID}`, undefined],
-    ["DELETE", `/api/github/apps/${UNKNOWN_ID}`, undefined],
-    ["POST", "/api/apps", { ...SMOKE_APP, githubAppId: UNKNOWN_ID }],
   ]) {
     const missing = await api(origin, method, path, body);
     check(
@@ -429,12 +454,12 @@ const checkFailurePath = (origin, row) => {
   const failure = row?.lastFailure;
   const wait = Date.parse(row?.nextAttemptAt ?? "") - Date.parse(failure?.failedAt ?? "");
   check(
-    `${origin} delivery without a GitHub App records NoGitHubApp and backs off a minute`,
+    `${origin} delivery without a GitHub installation records NoInstallation and backs off a minute`,
     row?.status === "Pending" &&
       row.attempts === 1 &&
       row.issueUrl === null &&
       failure?.step === "GitHub" &&
-      failure.message.startsWith("NoGitHubApp ") &&
+      failure.message.startsWith("NoInstallation ") &&
       wait > 55000 &&
       wait < 65000,
     JSON.stringify(row),
@@ -766,7 +791,7 @@ const smokeUploads = async (origin, appId, signer, github) => {
 
   if (!github) {
     console.log(
-      "skip the Filed to Pending upload check: no stored GitHub App is installed on the smoke repository owner",
+      "skip the Filed to Pending upload check: the GitHub App is not installed on the smoke repository owner",
     );
     return;
   }
@@ -846,63 +871,7 @@ const smokeSlackHappyPath = async (origin, appId, signer, workspace) => {
   );
 };
 
-const smokeSlackApps = async (origin) => {
-  const created = await api(origin, "POST", "/api/slack/apps", {
-    name: "bugstack-smoke-dummy",
-    clientId: DUMMY_CLIENT_ID,
-    clientSecret: "smoke-dummy-secret",
-    signingSecret: "",
-  });
-  check(
-    `${origin} POST /api/slack/apps stores a Slack app without echoing its secrets`,
-    created.status === 201 &&
-      created.body.slackAppId?.length === 25 &&
-      !("clientSecret" in created.body) &&
-      !("signingSecret" in created.body),
-    `${created.status} ${JSON.stringify(created.body)}`,
-  );
-  const slackAppId = created.body.slackAppId;
-  if (typeof slackAppId !== "string") return;
-
-  const apps = await api(origin, "GET", "/api/slack/apps");
-  check(
-    `${origin} GET /api/slack/apps lists the stored Slack app without secrets`,
-    apps.status === 200 &&
-      Array.isArray(apps.body) &&
-      apps.body.some((each) => each.slackAppId === slackAppId) &&
-      apps.body.every((each) => !("clientSecret" in each) && !("signingSecret" in each)),
-    `${apps.status} ${JSON.stringify(apps.body)}`,
-  );
-
-  const refused = await api(origin, "POST", "/api/slack/apps", {
-    name: "bugstack-smoke-dummy",
-    clientId: " ",
-    clientSecret: "x",
-  });
-  check(
-    `${origin} POST /api/slack/apps refuses a blank client id with 400`,
-    refused.status === 400 && refused.body.reason === "Invalid",
-    `${refused.status} ${JSON.stringify(refused.body)}`,
-  );
-
-  const install = await fetch(`${origin}/api/slack/apps/${slackAppId}/install`, {
-    redirect: "manual",
-    headers: token,
-  });
-  const location = new URL(install.headers.get("location") ?? "about:blank");
-  const state = location.searchParams.get("state") ?? "";
-  check(
-    `${origin} GET /api/slack/apps/{id}/install answers 302 to the Slack authorize page with a state`,
-    install.status === 302 &&
-      location.origin === "https://slack.com" &&
-      location.pathname === "/oauth/v2/authorize" &&
-      location.searchParams.get("client_id") === DUMMY_CLIENT_ID &&
-      location.searchParams.get("scope") === "chat:write" &&
-      location.searchParams.get("redirect_uri") === `${origin}/api/slack/oauth/callback` &&
-      /^[0-9a-f]{32}$/.test(state),
-    `${install.status} ${location}`,
-  );
-
+const smokeSlackInstall = async (origin) => {
   const unknown = await api(
     origin,
     "GET",
@@ -912,6 +881,33 @@ const smokeSlackApps = async (origin) => {
     `${origin} GET /api/slack/oauth/callback with an unknown state answers 400 InvalidState`,
     unknown.status === 400 && unknown.body.reason === "InvalidState",
     `${unknown.status} ${JSON.stringify(unknown.body)}`,
+  );
+
+  const install = await fetch(`${origin}/api/slack/install`, {
+    redirect: "manual",
+    headers: token,
+  });
+  if (install.status !== 302) {
+    const answer = { status: install.status, body: await json(install) };
+    check(
+      `${origin} GET /api/slack/install answers 503 NotBootstrapped naming SLACK_CLIENT_ID`,
+      notBootstrapped(answer, "SLACK_CLIENT_ID"),
+      `${answer.status} ${JSON.stringify(answer.body)}`,
+    );
+    return;
+  }
+  await install.arrayBuffer();
+  const location = new URL(install.headers.get("location") ?? "about:blank");
+  const state = location.searchParams.get("state") ?? "";
+  check(
+    `${origin} GET /api/slack/install answers 302 to the Slack authorize page with a state`,
+    location.origin === "https://slack.com" &&
+      location.pathname === "/oauth/v2/authorize" &&
+      (location.searchParams.get("client_id") ?? "") !== "" &&
+      location.searchParams.get("scope") === "chat:write" &&
+      location.searchParams.get("redirect_uri") === `${origin}/api/slack/oauth/callback` &&
+      /^[0-9a-f]{32}$/.test(state),
+    `${install.status} ${location}`,
   );
 
   const bogus = await api(origin, "GET", `/api/slack/oauth/callback?code=bogus&state=${state}`);
@@ -927,13 +923,6 @@ const smokeSlackApps = async (origin) => {
     reused.status === 400 && reused.body.reason === "InvalidState",
     `${reused.status} ${JSON.stringify(reused.body)}`,
   );
-
-  const removed = await api(origin, "DELETE", `/api/slack/apps/${slackAppId}`);
-  check(
-    `${origin} DELETE /api/slack/apps/{id} removes the dummy Slack app with 204`,
-    removed.status === 204,
-    `${removed.status} ${JSON.stringify(removed.body)}`,
-  );
 };
 
 const smokeSlack = async (origin, appId, otherAppId, signer, github) => {
@@ -946,15 +935,13 @@ const smokeSlack = async (origin, appId, otherAppId, signer, github) => {
     `${workspaces.status} ${JSON.stringify(workspaces.body)}`,
   );
 
-  await smokeSlackApps(origin);
+  await smokeSlackInstall(origin);
 
   for (const [method, path, body] of [
     ["PUT", `/api/apps/${appId}/slack`, { workspaceId: UNKNOWN_ID, channel: "bugs" }],
     ["PUT", `/api/apps/${UNKNOWN_ID}/slack`, { workspaceId: UNKNOWN_ID, channel: "bugs" }],
     ["DELETE", `/api/apps/${UNKNOWN_ID}/slack`, undefined],
     ["DELETE", `/api/slack/workspaces/${UNKNOWN_ID}`, undefined],
-    ["DELETE", `/api/slack/apps/${UNKNOWN_ID}`, undefined],
-    ["GET", `/api/slack/apps/${UNKNOWN_ID}/install`, undefined],
   ]) {
     const missing = await api(origin, method, path, body);
     check(
@@ -985,7 +972,7 @@ const smokeSlack = async (origin, appId, otherAppId, signer, github) => {
   const missing = [
     workspace === undefined && "no Slack workspace exists",
     SLACK_CHANNEL === "" && "BUGSTACK_SMOKE_SLACK_CHANNEL is not set",
-    !github && "no stored GitHub App is installed on the smoke repository owner",
+    !github && "the GitHub App is not installed on the smoke repository owner",
   ].filter(Boolean);
   if (missing.length > 0) {
     console.log(`skip the Slack happy path: ${missing.join(", ")}`);
@@ -1013,10 +1000,10 @@ const smokePages = async (origin) => {
   await visit(
     "the app form with the GitHub notice or picker",
     "/apps/new",
-    /No GitHub App yet|GitHub installation/,
+    /not installed on any GitHub account|GitHub installation|npm run bootstrap/,
   );
-  await visit("the GitHub Apps page", "/github", /Create (another )?GitHub App/);
-  await visit("the Slack page", "/slack", /Create (a|another) Slack app/);
+  await visit("the GitHub page", "/github", "Install bugstack on a GitHub account");
+  await visit("the Slack page", "/slack", "Add bugstack to a workspace");
   await visit(
     "the app page with its Slack section",
     `/apps/${smoked.appId}`,
