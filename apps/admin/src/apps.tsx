@@ -11,6 +11,7 @@ import {
   isSecretMissing,
   listApps,
   listInstallations,
+  listReports,
   listRepos,
   revokeClient,
   updateApp,
@@ -368,6 +369,44 @@ const RevokeButton = ({ appId, clientId }: { appId: string; clientId: string }) 
   );
 };
 
+const Reports = ({ appId }: { appId: string }) => {
+  const reports = useQuery({
+    queryKey: [...appKey(appId), "reports"],
+    queryFn: () => listReports(appId),
+  });
+  if (reports.isPending) return <p>Loading reports…</p>;
+  if (reports.isError) return <Failure what="Loading the reports" error={reports.error} />;
+  if (reports.data.length === 0) {
+    return (
+      <p>No reports yet. A client sends one with a signed POST to /v1/apps/{appId}/reports.</p>
+    );
+  }
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>Title</th>
+          <th>Status</th>
+          <th>Attempts</th>
+          <th>Received</th>
+          <th>Client</th>
+        </tr>
+      </thead>
+      <tbody>
+        {reports.data.map((report) => (
+          <tr key={report.reportId}>
+            <td>{report.title}</td>
+            <td>{report.status}</td>
+            <td>{report.attempts}</td>
+            <td>{report.receivedAt}</td>
+            <td>{report.clientName}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+};
+
 export const AppPage = () => {
   const { appId = "" } = useParams<{ appId: string }>();
   const detail = useQuery({ queryKey: appKey(appId), queryFn: () => getApp(appId) });
@@ -429,6 +468,8 @@ export const AppPage = () => {
         </table>
       )}
       <NewClient appId={app.appId} />
+      <h3>Reports</h3>
+      <Reports appId={app.appId} />
     </section>
   );
 };

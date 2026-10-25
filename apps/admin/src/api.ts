@@ -47,6 +47,28 @@ export type AppDetail = {
   clients: Client[];
 };
 
+export type ReportStatus = "Pending" | "Filed" | "Failed";
+
+export type FailureStep = "GitHub" | "Slack";
+
+export type LastFailure = {
+  failedAt: string;
+  step: FailureStep;
+  message: string;
+};
+
+export type ReportRow = {
+  reportId: string;
+  title: string;
+  status: ReportStatus;
+  attempts: number;
+  receivedAt: string;
+  clientName: string;
+  issueUrl: string | null;
+  slackPosted: boolean;
+  lastFailure: LastFailure | null;
+};
+
 export type Installation = {
   installationId: number;
   account: string;
@@ -104,6 +126,24 @@ const isAppDetail: Guard<AppDetail> = (value): value is AppDetail =>
   isApp(value.app) &&
   Array.isArray(value.clients) &&
   value.clients.every(isClient);
+
+const isLastFailure: Guard<LastFailure> = (value): value is LastFailure =>
+  isRecord(value) &&
+  typeof value.failedAt === "string" &&
+  (value.step === "GitHub" || value.step === "Slack") &&
+  typeof value.message === "string";
+
+const isReportRow: Guard<ReportRow> = (value): value is ReportRow =>
+  isRecord(value) &&
+  typeof value.reportId === "string" &&
+  typeof value.title === "string" &&
+  (value.status === "Pending" || value.status === "Filed" || value.status === "Failed") &&
+  typeof value.attempts === "number" &&
+  typeof value.receivedAt === "string" &&
+  typeof value.clientName === "string" &&
+  (value.issueUrl === null || typeof value.issueUrl === "string") &&
+  typeof value.slackPosted === "boolean" &&
+  (value.lastFailure === null || isLastFailure(value.lastFailure));
 
 const isInstallation: Guard<Installation> = (value): value is Installation =>
   isRecord(value) && typeof value.installationId === "number" && typeof value.account === "string";
@@ -186,6 +226,9 @@ export const createClient = (appId: string, name: string): Promise<CreatedClient
 
 export const revokeClient = (clientId: string): Promise<Client> =>
   request("POST", `/api/clients/${encodeURIComponent(clientId)}/revoke`, isClient, {});
+
+export const listReports = (appId: string): Promise<ReportRow[]> =>
+  request("GET", `/api/apps/${encodeURIComponent(appId)}/reports`, listOf(isReportRow));
 
 export const listInstallations = (): Promise<Installation[]> =>
   request("GET", "/api/github/installations", listOf(isInstallation));
