@@ -121,7 +121,7 @@ article > footer {
 
 .nav-links a[aria-current="page"] {
   color: var(--pico-primary);
-  background: var(--pico-primary-focus);
+  background: color-mix(in srgb, var(--pico-primary-background) 12%, transparent);
 }
 
 .brand {
@@ -450,7 +450,7 @@ pre.mono {
   flex: none;
 }
 
-a.with-icon .icon {
+a.with-icon:not(.button) .icon {
   opacity: 0.6;
   width: 0.85em;
   height: 0.85em;
@@ -471,6 +471,12 @@ a.button {
     background-color var(--pico-transition),
     border-color var(--pico-transition),
     color var(--pico-transition);
+}
+
+a.button.with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
 }
 
 a.button:hover {
@@ -514,8 +520,8 @@ form > button[type="submit"] {
   width: auto;
 }
 
-.form-card {
-  max-width: 44rem;
+.form-card .grid {
+  row-gap: 0;
 }
 
 .form-card > header h3 {
@@ -846,6 +852,10 @@ code.secret {
 
   .facts {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .facts > div:first-child {
+    grid-column: 1 / -1;
   }
 
   .table-wrap {
