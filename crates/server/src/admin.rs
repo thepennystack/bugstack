@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use worker::*;
 
 use crate::auth::{self, Access, AccessApp, Identity, Keys};
-use crate::refuse;
+use crate::{refuse, routes};
 
 const LOCAL_ADMIN: &str = "local";
 
@@ -163,23 +163,14 @@ pub async fn handle(mut req: Request, env: &Env) -> Result<Response> {
         Ok(body) => body,
         Err(response) => return Ok(response),
     };
-    route(ApiRequest {
-        method: req.method(),
-        path: req.url()?.path().to_string(),
-        admin,
-        body,
-    })
-}
-
-fn route(request: ApiRequest) -> Result<Response> {
-    if request.method == Method::Get && request.path == "/api/me" {
-        return Response::from_json(&Me {
-            email: request.admin,
-        });
-    }
-    refuse(
-        404,
-        "NotFound",
-        &format!("no route for {} {}", request.method, request.path),
+    routes::route(
+        ApiRequest {
+            method: req.method(),
+            path: req.url()?.path().to_string(),
+            admin,
+            body,
+        },
+        env,
     )
+    .await
 }

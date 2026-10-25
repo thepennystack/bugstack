@@ -1,5 +1,9 @@
 pub mod admin;
 pub mod auth;
+pub mod github;
+pub mod random;
+pub mod routes;
+pub mod store;
 
 use serde_json::json;
 use worker::*;

@@ -45,10 +45,13 @@ name = "bugstack-server"
 version = "0.0.0"
 dependencies = [
  "base64",
+ "js-sys",
  "rsa",
  "serde",
  "serde_json",
  "sha2",
+ "wasm-bindgen",
+ "web-sys",
  "worker",
  "worker-macros",
 ]
