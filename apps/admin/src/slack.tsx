@@ -1,59 +1,76 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/preact-query";
 import { useState } from "preact/hooks";
-import { Link } from "wouter-preact";
+import { Link, useSearch } from "wouter-preact";
 import {
   type App,
-  createWorkspace,
+  createSlackApp,
+  deleteSlackApp,
   deleteWorkspace,
+  listSlackApps,
   listWorkspaces,
   removeAppSlack,
+  type SlackApp,
   setAppSlack,
+  slackInstallUrl,
   type Workspace,
 } from "./api";
 import { Failure } from "./notices";
 import { ExternalIcon, Loading, PageHeader, When } from "./ui";
 
 const WORKSPACES = ["slack", "workspaces"];
+const SLACK_APPS = ["slack", "apps"];
 
-const MANIFEST = {
+const manifestFor = (origin: string) => ({
   display_information: { name: "bugstack", description: "Bug reports filed as GitHub issues" },
   features: { bot_user: { display_name: "bugstack", always_online: false } },
-  oauth_config: { scopes: { bot: ["chat:write"] } },
-};
+  oauth_config: {
+    redirect_urls: [`${origin}/api/slack/oauth/callback`],
+    scopes: { bot: ["chat:write"] },
+  },
+});
 
-const CREATE_SLACK_APP = `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(JSON.stringify(MANIFEST))}`;
+const createSlackAppUrl = (): string =>
+  `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(JSON.stringify(manifestFor(window.location.origin)))}`;
 
-const NewWorkspace = () => {
+const CreateSlackApp = () => {
   const queryClient = useQueryClient();
-  const [name, setName] = useState("");
-  const [botToken, setBotToken] = useState("");
+  const [name, setName] = useState("bugstack");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [signingSecret, setSigningSecret] = useState("");
   const create = useMutation({
-    mutationFn: () => createWorkspace({ name, botToken }),
+    mutationFn: () =>
+      createSlackApp({
+        name: name.trim(),
+        clientId: clientId.trim(),
+        clientSecret: clientSecret.trim(),
+        signingSecret: signingSecret.trim(),
+      }),
     onSuccess: () => {
-      setName("");
-      setBotToken("");
-      queryClient.invalidateQueries({ queryKey: WORKSPACES });
+      setClientId("");
+      setClientSecret("");
+      setSigningSecret("");
+      queryClient.invalidateQueries({ queryKey: SLACK_APPS });
     },
   });
   return (
     <article class="form-card">
       <header>
-        <h3>Add a workspace</h3>
-        <p class="muted">bugstack checks the token with Slack before it stores it.</p>
+        <h3>Create a Slack app</h3>
+        <p class="muted">
+          Slack does not hand the app back like GitHub does, so paste its client id and secret once.
+        </p>
       </header>
       <ol class="how-to">
         <li>
-          <a href={CREATE_SLACK_APP} target="_blank" rel="noreferrer" class="with-icon">
+          <a href={createSlackAppUrl()} target="_blank" rel="noreferrer" class="button with-icon">
             Create a Slack app
             <ExternalIcon />
-          </a>{" "}
-          from the prefilled manifest, then install it in your workspace.
+          </a>
         </li>
         <li>
-          Paste its <code class="mono">xoxb-</code> bot token below.
-        </li>
-        <li>
-          Run <code class="mono">/invite @bugstack</code> in each channel an app posts to.
+          Copy the client id and client secret from its <em>Basic Information</em> page into this
+          form.
         </li>
       </ol>
       <form
@@ -66,42 +83,77 @@ const NewWorkspace = () => {
           <label>
             Name
             <input
-              name="workspaceName"
+              name="slackAppName"
               required
               maxLength={80}
-              placeholder="Acme"
               value={name}
               onInput={(event) => setName(event.currentTarget.value)}
             />
           </label>
           <label>
-            Bot token
+            Client id
             <input
-              name="botToken"
+              name="clientId"
+              class="mono"
+              autoComplete="off"
+              required
+              maxLength={255}
+              placeholder="1234567890.1234567890"
+              value={clientId}
+              onInput={(event) => setClientId(event.currentTarget.value)}
+            />
+          </label>
+          <label>
+            Client secret
+            <input
+              name="clientSecret"
               type="password"
               class="mono"
               autoComplete="off"
               required
-              placeholder="xoxb-…"
-              value={botToken}
-              onInput={(event) => setBotToken(event.currentTarget.value)}
+              maxLength={255}
+              value={clientSecret}
+              onInput={(event) => setClientSecret(event.currentTarget.value)}
+            />
+          </label>
+          <label>
+            Signing secret
+            <input
+              name="signingSecret"
+              type="password"
+              class="mono"
+              autoComplete="off"
+              maxLength={255}
+              placeholder="optional"
+              value={signingSecret}
+              onInput={(event) => setSigningSecret(event.currentTarget.value)}
             />
           </label>
         </div>
-        {create.isError && <Failure what="Adding the workspace" error={create.error} />}
+        {create.isError && <Failure what="Storing the Slack app" error={create.error} />}
         <button type="submit" aria-busy={create.isPending} disabled={create.isPending}>
-          {create.isPending ? "Checking the token…" : "Add workspace"}
+          {create.isPending ? "Storing…" : "Store Slack app"}
         </button>
       </form>
     </article>
   );
 };
 
-const DeleteWorkspace = ({ workspace }: { workspace: Workspace }) => {
+const DeleteButton = ({
+  label,
+  what,
+  queryKey,
+  remove: removeFn,
+}: {
+  label: string;
+  what: string;
+  queryKey: string[];
+  remove: () => Promise<undefined>;
+}) => {
   const queryClient = useQueryClient();
   const remove = useMutation({
-    mutationFn: () => deleteWorkspace(workspace.workspaceId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: WORKSPACES }),
+    mutationFn: removeFn,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey }),
   });
   return (
     <>
@@ -112,49 +164,101 @@ const DeleteWorkspace = ({ workspace }: { workspace: Workspace }) => {
         disabled={remove.isPending}
         onClick={() => remove.mutate()}
       >
-        {remove.isPending ? "Deleting…" : "Delete"}
+        {remove.isPending ? "Deleting…" : label}
       </button>
-      {remove.isError && <Failure what={`Deleting ${workspace.name}`} error={remove.error} />}
+      {remove.isError && <Failure what={what} error={remove.error} />}
     </>
+  );
+};
+
+const SlackAppCard = ({ app }: { app: SlackApp }) => (
+  <article class="card">
+    <header>
+      <h3>{app.name}</h3>
+    </header>
+    <ul class="meta">
+      <li>
+        <span class="meta-label">Client id</span>
+        <span class="mono">{app.clientId}</span>
+      </li>
+      <li>
+        <span class="meta-label">Stored</span>
+        <When iso={app.createdAt} />
+      </li>
+    </ul>
+    <footer class="card-actions">
+      <a class="button small" href={slackInstallUrl(app.slackAppId)}>
+        Add to Slack
+      </a>
+      <DeleteButton
+        label="Delete"
+        what={`Deleting ${app.name}`}
+        queryKey={SLACK_APPS}
+        remove={() => deleteSlackApp(app.slackAppId)}
+      />
+    </footer>
+  </article>
+);
+
+const SlackApps = () => {
+  const apps = useQuery({ queryKey: SLACK_APPS, queryFn: listSlackApps });
+  return (
+    <section>
+      <h2>Add to Slack</h2>
+      {apps.isPending && <Loading what="Slack apps" />}
+      {apps.isError && <Failure what="Loading the Slack apps" error={apps.error} />}
+      {apps.isSuccess && apps.data.length === 0 && (
+        <p class="empty-line">No Slack app stored yet. Create one above.</p>
+      )}
+      {apps.isSuccess && apps.data.length > 0 && (
+        <div class="card-grid">
+          {apps.data.map((app) => (
+            <SlackAppCard key={app.slackAppId} app={app} />
+          ))}
+        </div>
+      )}
+    </section>
   );
 };
 
 const WorkspaceCard = ({ workspace }: { workspace: Workspace }) => (
   <article class="card">
     <header>
-      <h3>{workspace.name}</h3>
+      <h3>{workspace.teamName}</h3>
     </header>
     <ul class="meta">
       <li>
-        <span class="meta-label">Workspace id</span>
-        <span class="mono">{workspace.workspaceId}</span>
+        <span class="meta-label">Slack app</span>
+        <span>{workspace.slackAppName}</span>
       </li>
       <li>
-        <span class="meta-label">Added</span>
+        <span class="meta-label">Installed</span>
         <When iso={workspace.createdAt} />
       </li>
     </ul>
     <footer class="card-actions">
-      <DeleteWorkspace workspace={workspace} />
+      <DeleteButton
+        label="Delete"
+        what={`Deleting ${workspace.teamName}`}
+        queryKey={WORKSPACES}
+        remove={() => deleteWorkspace(workspace.workspaceId)}
+      />
     </footer>
   </article>
 );
 
-export const Workspaces = () => {
+const WorkspaceList = () => {
   const workspaces = useQuery({ queryKey: WORKSPACES, queryFn: listWorkspaces });
   return (
-    <>
-      <PageHeader
-        title="Slack workspaces"
-        description="Workspaces whose channels can get a link to each new issue."
-      />
+    <section>
+      <h2>Workspaces</h2>
       {workspaces.isPending && <Loading what="Slack workspaces" />}
       {workspaces.isError && (
         <Failure what="Loading the Slack workspaces" error={workspaces.error} />
       )}
       {workspaces.isSuccess && workspaces.data.length === 0 && (
         <p class="empty-line">
-          No Slack workspaces yet. Add one below, then pick a channel on an app.
+          No Slack workspaces yet. Press Add to Slack, then pick a channel on an app.
         </p>
       )}
       {workspaces.isSuccess && workspaces.data.length > 0 && (
@@ -164,7 +268,32 @@ export const Workspaces = () => {
           ))}
         </div>
       )}
-      <NewWorkspace />
+    </section>
+  );
+};
+
+export const Workspaces = () => {
+  const installed = new URLSearchParams(useSearch()).get("installed");
+  return (
+    <>
+      <PageHeader
+        title="Slack"
+        description="Workspaces whose channels can get a link to each new issue."
+      />
+      {installed !== null && (
+        <article class="callout callout-success" role="status">
+          <header>
+            <h3>Installed in {installed}</h3>
+          </header>
+          <p>
+            Run <code class="mono">/invite @bugstack</code> in each channel an app posts to, then
+            pick the channel on the app.
+          </p>
+        </article>
+      )}
+      <CreateSlackApp />
+      <SlackApps />
+      <WorkspaceList />
     </>
   );
 };
@@ -192,7 +321,7 @@ const SlackForm = ({ app, workspaces }: { app: App; workspaces: Workspace[] }) =
       <p class="field-note">
         {app.slack === null
           ? "Reports from this app go to GitHub only."
-          : `Reports post to ${app.slack.channel} in ${current?.name ?? app.slack.workspaceId}.`}
+          : `Reports post to ${app.slack.channel} in ${current?.teamName ?? app.slack.workspaceId}.`}
       </p>
       <form
         class="inline-form"
@@ -212,7 +341,7 @@ const SlackForm = ({ app, workspaces }: { app: App; workspaces: Workspace[] }) =
             <option value="">Choose a workspace</option>
             {workspaces.map((workspace) => (
               <option key={workspace.workspaceId} value={workspace.workspaceId}>
-                {workspace.name}
+                {workspace.teamName}
               </option>
             ))}
           </select>
@@ -259,8 +388,8 @@ export const AppSlack = ({ app }: { app: App }) => {
   if (workspaces.data.length === 0) {
     return (
       <p class="empty-line">
-        No Slack workspaces yet. <Link href="/slack">Add one</Link> to post this app's reports to a
-        channel.
+        No Slack workspaces yet. <Link href="/slack">Add bugstack to Slack</Link> to post this app's
+        reports to a channel.
       </p>
     );
   }

@@ -87,13 +87,24 @@ export type ReportRow = {
 
 export type Workspace = {
   workspaceId: string;
-  name: string;
+  teamId: string;
+  teamName: string;
+  slackAppName: string;
   createdAt: string;
 };
 
-export type WorkspaceInput = {
+export type SlackApp = {
+  slackAppId: string;
   name: string;
-  botToken: string;
+  clientId: string;
+  createdAt: string;
+};
+
+export type SlackAppInput = {
+  name: string;
+  clientId: string;
+  clientSecret: string;
+  signingSecret: string;
 };
 
 export type Installation = {
@@ -228,9 +239,20 @@ const isManifestState: Guard<ManifestState> = (value): value is ManifestState =>
 const isWorkspace: Guard<Workspace> = (value): value is Workspace =>
   isRecord(value) &&
   typeof value.workspaceId === "string" &&
-  typeof value.name === "string" &&
+  typeof value.teamId === "string" &&
+  typeof value.teamName === "string" &&
+  typeof value.slackAppName === "string" &&
   typeof value.createdAt === "string" &&
   !("botToken" in value);
+
+const isSlackApp: Guard<SlackApp> = (value): value is SlackApp =>
+  isRecord(value) &&
+  typeof value.slackAppId === "string" &&
+  typeof value.name === "string" &&
+  typeof value.clientId === "string" &&
+  typeof value.createdAt === "string" &&
+  !("clientSecret" in value) &&
+  !("signingSecret" in value);
 
 const isEmpty: Guard<undefined> = (value): value is undefined => value === undefined;
 
@@ -346,8 +368,17 @@ export const deleteGitHubApp = (githubAppId: string): Promise<undefined> =>
 export const listWorkspaces = (): Promise<Workspace[]> =>
   request("GET", "/api/slack/workspaces", listOf(isWorkspace));
 
-export const createWorkspace = (input: WorkspaceInput): Promise<Workspace> =>
-  request("POST", "/api/slack/workspaces", isWorkspace, input);
+export const listSlackApps = (): Promise<SlackApp[]> =>
+  request("GET", "/api/slack/apps", listOf(isSlackApp));
+
+export const createSlackApp = (input: SlackAppInput): Promise<SlackApp> =>
+  request("POST", "/api/slack/apps", isSlackApp, input);
+
+export const deleteSlackApp = (slackAppId: string): Promise<undefined> =>
+  request("DELETE", `/api/slack/apps/${encodeURIComponent(slackAppId)}`, isEmpty);
+
+export const slackInstallUrl = (slackAppId: string): string =>
+  `/api/slack/apps/${encodeURIComponent(slackAppId)}/install`;
 
 export const deleteWorkspace = (workspaceId: string): Promise<undefined> =>
   request("DELETE", `/api/slack/workspaces/${encodeURIComponent(workspaceId)}`, isEmpty);
