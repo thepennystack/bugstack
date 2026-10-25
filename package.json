@@ -24,7 +24,8 @@
     "access:env": "node npm-scripts/access-env.mjs",
     "access:lookup": "node npm-scripts/access-lookup.mjs",
     "secret": "node npm-scripts/secret.mjs",
-    "smoke": "node npm-scripts/smoke.mjs"
+    "smoke": "node npm-scripts/smoke.mjs",
+    "test:rust": "cargo test --workspace"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.6.3",

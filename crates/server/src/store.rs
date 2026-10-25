@@ -3,6 +3,7 @@ use wasm_bindgen::JsValue;
 use worker::{D1Database, Result};
 
 use crate::random;
+use crate::sign::SigningClient;
 
 const APP_SELECT: &str = "SELECT a.app_id, a.name, a.description, a.github_installation_id, \
      a.github_repo, a.created_at, s.workspace_id, s.channel \
@@ -213,4 +214,120 @@ pub async fn revoke_client(db: &D1Database, client_id: &str) -> Result<Option<Cl
         .run()
         .await?;
     get_client(db, client_id).await
+}
+
+pub async fn signing_client(db: &D1Database, client_id: &str) -> Result<Option<SigningClient>> {
+    db.prepare("SELECT app_id, status, secret FROM client WHERE client_id = ?1")
+        .bind(&[text(client_id)])?
+        .first(None)
+        .await
+}
+
+pub struct NewReport<'a> {
+    pub app_id: &'a str,
+    pub client_id: &'a str,
+    pub title: &'a str,
+    pub payload: &'a str,
+}
+
+pub async fn insert_report(db: &D1Database, report: &NewReport<'_>) -> Result<String> {
+    let report_id = random::id()?;
+    let received_at = now();
+    db.prepare(
+        "INSERT INTO report (report_id, app_id, client_id, received_at, title, payload, status, \
+         attempts, next_attempt_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'Pending', 0, ?4)",
+    )
+    .bind(&[
+        text(&report_id),
+        text(report.app_id),
+        text(report.client_id),
+        text(&received_at),
+        text(report.title),
+        text(report.payload),
+    ])?
+    .run()
+    .await?;
+    Ok(report_id)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastFailure {
+    pub failed_at: String,
+    pub step: String,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportRow {
+    pub report_id: String,
+    pub title: String,
+    pub status: String,
+    pub attempts: u32,
+    pub received_at: String,
+    pub client_name: String,
+    pub issue_url: Option<String>,
+    pub slack_posted: bool,
+    pub last_failure: Option<LastFailure>,
+}
+
+#[derive(Deserialize)]
+struct ReportRecord {
+    report_id: String,
+    title: String,
+    status: String,
+    attempts: u32,
+    received_at: String,
+    client_name: String,
+    issue_url: Option<String>,
+    slack_posted: u8,
+    failed_at: Option<String>,
+    step: Option<String>,
+    message: Option<String>,
+}
+
+impl From<ReportRecord> for ReportRow {
+    fn from(row: ReportRecord) -> Self {
+        let last_failure = match (row.failed_at, row.step, row.message) {
+            (Some(failed_at), Some(step), Some(message)) => Some(LastFailure {
+                failed_at,
+                step,
+                message,
+            }),
+            _ => None,
+        };
+        ReportRow {
+            report_id: row.report_id,
+            title: row.title,
+            status: row.status,
+            attempts: row.attempts,
+            received_at: row.received_at,
+            client_name: row.client_name,
+            issue_url: row.issue_url,
+            slack_posted: row.slack_posted != 0,
+            last_failure,
+        }
+    }
+}
+
+pub async fn list_reports(db: &D1Database, app_id: &str) -> Result<Vec<ReportRow>> {
+    let rows: Vec<ReportRecord> = db
+        .prepare(
+            "SELECT r.report_id, r.title, r.status, r.attempts, r.received_at, \
+             c.name AS client_name, g.url AS issue_url, \
+             (p.report_id IS NOT NULL) AS slack_posted, f.failed_at, f.step, f.message \
+             FROM report r \
+             JOIN client c ON c.client_id = r.client_id \
+             LEFT JOIN github_issue g ON g.report_id = r.report_id \
+             LEFT JOIN slack_post p ON p.report_id = r.report_id \
+             LEFT JOIN failure f ON f.report_id = r.report_id AND f.failed_at = \
+             (SELECT MAX(failed_at) FROM failure WHERE report_id = r.report_id) \
+             WHERE r.app_id = ?1 ORDER BY r.received_at DESC, r.report_id DESC LIMIT 100",
+        )
+        .bind(&[text(app_id)])?
+        .all()
+        .await?
+        .results()?;
+    Ok(rows.into_iter().map(ReportRow::from).collect())
 }

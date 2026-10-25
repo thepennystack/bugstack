@@ -190,6 +190,13 @@ async fn revoke_client(db: &D1Database, client_id: &str) -> Result<Response> {
     }
 }
 
+async fn list_reports(db: &D1Database, app_id: &str) -> Result<Response> {
+    if store::get_app(db, app_id).await?.is_none() {
+        return not_found("app", app_id);
+    }
+    Response::from_json(&store::list_reports(db, app_id).await?)
+}
+
 pub async fn route(request: ApiRequest, env: &Env) -> Result<Response> {
     let segments: Vec<&str> = request
         .path
@@ -208,6 +215,7 @@ pub async fn route(request: ApiRequest, env: &Env) -> Result<Response> {
         (Method::Post, ["apps"]) => create_app(&env.d1("DB")?, body).await,
         (Method::Get, ["apps", app_id]) => get_app(&env.d1("DB")?, app_id).await,
         (Method::Put, ["apps", app_id]) => put_app(&env.d1("DB")?, app_id, body).await,
+        (Method::Get, ["apps", app_id, "reports"]) => list_reports(&env.d1("DB")?, app_id).await,
         (Method::Post, ["apps", app_id, "clients"]) => {
             create_client(&env.d1("DB")?, app_id, body).await
         }

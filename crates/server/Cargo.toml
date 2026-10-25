@@ -9,6 +9,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 base64 = "0.22"
+hex = "0.4"
+hmac = "0.12"
 js-sys = "0.3.106"
 rsa = { version = "0.9", default-features = false, features = ["sha2"] }
 serde = { version = "1", features = ["derive"] }

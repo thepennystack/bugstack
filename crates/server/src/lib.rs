@@ -1,8 +1,10 @@
 pub mod admin;
 pub mod auth;
 pub mod github;
+pub mod ingest;
 pub mod random;
 pub mod routes;
+pub mod sign;
 pub mod store;
 
 use serde_json::json;
@@ -29,10 +31,22 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     stamp_commit(route(req, &env).await?)
 }
 
+fn report_app(path: &str) -> Option<&str> {
+    path.strip_prefix("/v1/apps/")?
+        .strip_suffix("/reports")
+        .filter(|app_id| !app_id.is_empty() && !app_id.contains('/'))
+}
+
 async fn route(req: Request, env: &Env) -> Result<Response> {
     let url = req.url()?;
     if url.path().starts_with("/api/") {
         return admin::handle(req, env).await;
+    }
+    if req.method() == Method::Post
+        && let Some(app_id) = report_app(url.path())
+    {
+        let app_id = app_id.to_string();
+        return ingest::handle(req, env, &app_id).await;
     }
     if req.method() == Method::Get && url.path() == "/v1/health" {
         return Response::from_json(&json!({ "commit": COMMIT }));
