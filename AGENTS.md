@@ -23,7 +23,9 @@ bugstack takes signed bug reports from app backends and files each as a GitHub i
 | `npm run access:env`                 | Write the service token to `~/.config/bugstack/access-env` (mode 600)                                     |
 | `npm run access:lookup`              | Print the PIN provider id and team domain                                                                 |
 | `npm run secret -- <NAME>`           | Pipe stdin to `wrangler secret put`                                                                       |
-| `npm run smoke [-- <sha>]`           | Check health, Access, the admin API on both hosts, then render the pages in headless Chromium             |
+| `npm run smoke [-- <sha>]`           | Check health, Access, the admin API and report ingest, then render the pages in headless Chromium         |
+| `npm run report -- …`                | Sign and POST one report (see Report ingest)                                                              |
+| `npm run test:rust`                  | `cargo test`: the HMAC check in `sign.rs`                                                                 |
 
 ## Admin API
 
@@ -34,10 +36,17 @@ Routes live in `crates/server/src/routes.rs`, D1 queries in `store.rs`, GitHub A
 - `GET /api/github/installations`, `GET /api/github/installations/{id}/repos`
 - `GET`/`POST /api/apps`, `GET`/`PUT /api/apps/{appId}`
 - `POST /api/apps/{appId}/clients` returns the secret once; `POST /api/clients/{clientId}/revoke`
+- `GET /api/apps/{appId}/reports` returns the newest 100 reports
 
 Bad input is 400 `Invalid`, an unknown id 404 `NotFound`. A missing GitHub secret is 503 `SecretMissing`; set both from the GitHub App settings with `echo <app id> | npm run secret -- GITHUB_APP_ID` and `openssl pkcs8 -topk8 -nocrypt -in <key>.pem | npm run secret -- GITHUB_APP_PRIVATE_KEY`. `migrations/0001_init.sql` holds the whole schema. Smoke reuses the app `bugstack-smoke` and its client `agent`; seed only through the API.
 
 The admin app keeps its response types by hand in `apps/admin/src/api.ts`. A 401 renders the signed-out notice; any other failure renders a notice with a prefilled issue link.
+
+## Report ingest
+
+`POST /v1/apps/{appId}/reports` (`ingest.rs`) takes a JSON object of at most 60 KiB with a `title` of 1 to 200 characters; every other key stays in `payload`. The client signs it with `X-Bugstack-Client` (client id), `X-Bugstack-Timestamp` (Unix seconds, within 300 s) and `X-Bugstack-Signature`: lower-case hex HMAC-SHA256 over `"{timestamp}.{raw body}"`, keyed with the UTF-8 bytes of the client secret. `sign.rs` holds the check and its test. Refusals in order: 413 `TooLarge`; 401 `MissingSignature`, `StaleTimestamp`, `UnknownClient` (unknown, revoked or another app's), `BadSignature`; 400 `InvalidReport`. Success is 202 `{reportId}` and a `Pending` row; nothing delivers it yet.
+
+`BUGSTACK_CLIENT_SECRET=… npm run report -- <origin> <appId> <clientId> "<title>" [--error <text>] [--body <text>]` signs one report with `npm-scripts/sign.mjs` and prints the response. Smoke keeps its signing client `smoke-signer` in `~/.config/bugstack/smoke-client` (mode 600), and reuses the revoked `smoke-revoke` and the app `bugstack-smoke-other`.
 
 ## Infra
 
