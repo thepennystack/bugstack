@@ -20,6 +20,15 @@ pub struct Slack {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Counts {
+    pub clients: u64,
+    pub pending: u64,
+    pub filed: u64,
+    pub failed: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct App {
     pub app_id: String,
     pub name: String,
@@ -28,6 +37,7 @@ pub struct App {
     pub installation_id: u64,
     pub github_repo: String,
     pub slack: Option<Slack>,
+    pub counts: Counts,
     pub created_at: String,
 }
 
@@ -42,6 +52,10 @@ struct AppRow {
     created_at: String,
     workspace_id: Option<String>,
     channel: Option<String>,
+    clients: u64,
+    pending: u64,
+    filed: u64,
+    failed: u64,
 }
 
 impl From<AppRow> for App {
@@ -61,6 +75,12 @@ impl From<AppRow> for App {
             installation_id: row.github_installation_id,
             github_repo: row.github_repo,
             slack,
+            counts: Counts {
+                clients: row.clients,
+                pending: row.pending,
+                filed: row.filed,
+                failed: row.failed,
+            },
             created_at: row.created_at,
         }
     }

@@ -44,7 +44,7 @@ Routes live in `crates/server/src/routes.rs`, D1 queries in `store.rs`, GitHub A
 - `GET`/`POST /api/slack/workspaces`: create takes `{name, botToken}`, runs Slack `auth.test` and answers 400 with its error on refusal; `DELETE /api/slack/workspaces/{workspaceId}` is 204, or 409 `InUse` while an app posts to it
 - `PUT /api/apps/{appId}/slack` `{workspaceId, channel}` and `DELETE /api/apps/{appId}/slack`, both 204; an unknown workspace is 404
 
-An app carries `githubAppId`, the empty string until one is picked; an unknown id is 404. The API never returns a bot token or a GitHub App key or secret.
+An app carries `githubAppId`, the empty string until one is picked; an unknown id is 404. It also carries `counts: {clients, pending, filed, failed}`: its active clients and its reports by status. The API never returns a bot token or a GitHub App key or secret.
 
 Bad input is 400 `Invalid`, an unknown id 404 `NotFound`. A stored key that does not import is 500 `KeyInvalid`. `migrations/` holds the schema. Smoke reuses the app `bugstack-smoke` and its client `agent`; seed only through the API.
 
