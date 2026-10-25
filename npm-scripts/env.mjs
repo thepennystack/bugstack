@@ -5,6 +5,7 @@ import { join } from "node:path";
 export const CONFIG_DIR = join(homedir(), ".config", "bugstack");
 export const CF_ENV = join(CONFIG_DIR, "cf-env");
 export const ACCESS_ENV = join(CONFIG_DIR, "access-env");
+export const UPLOAD_SECRET = join(CONFIG_DIR, "upload-secret");
 export const TFSTATE = join(CONFIG_DIR, "terraform.tfstate");
 export const TOFU_INIT = [
   "init",

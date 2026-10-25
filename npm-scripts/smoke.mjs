@@ -1,8 +1,10 @@
 import { execFileSync } from "node:child_process";
+import { createHmac } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { crc32, deflateSync } from "node:zlib";
 import { chromium } from "playwright-core";
-import { accessHeaders, CONFIG_DIR, cloudflareEnv } from "./env.mjs";
+import { accessHeaders, CONFIG_DIR, cloudflareEnv, UPLOAD_SECRET } from "./env.mjs";
 import { signedHeaders } from "./sign.mjs";
 
 const WORKERS_DEV = "bugstack.matthijs-f49.workers.dev";
@@ -19,6 +21,7 @@ const DELIVERY_WAIT_MS = 20000;
 const SMOKE_CLIENT = "agent";
 const SIGNER = "smoke-signer";
 const SIGNER_FILE = join(CONFIG_DIR, "smoke-client");
+const OTHER_SIGNER_FILE = join(CONFIG_DIR, "smoke-other-client");
 const REVOKE_CLIENT = "smoke-revoke";
 const OTHER_APP = { ...SMOKE_APP, name: "bugstack-smoke-other" };
 const MAX_BODY = 60 * 1024;
@@ -157,6 +160,7 @@ const smokeApi = async (origin) => {
     installationId !== undefined,
   );
 
+  await smokeUploads(origin, app.appId, other.appId, signer, installationId !== undefined);
   await smokeSlack(origin, app.appId, other.appId, signer, installationId !== undefined);
 
   for (const [label, body] of [
@@ -214,13 +218,13 @@ const smokeRevoked = async (origin, appId, clients) => {
   return throwaway.body.clientId;
 };
 
-const readSigner = () => {
-  if (!existsSync(SIGNER_FILE)) return undefined;
-  return JSON.parse(readFileSync(SIGNER_FILE, "utf8"));
+const readSigner = (file) => {
+  if (!existsSync(file)) return undefined;
+  return JSON.parse(readFileSync(file, "utf8"));
 };
 
-const smokeSigner = async (origin, appId, clients) => {
-  const saved = readSigner();
+const smokeSigner = async (origin, appId, clients, file = SIGNER_FILE) => {
+  const saved = readSigner(file);
   const active = clients.some(
     (client) => client.clientId === saved?.clientId && client.status === "Active",
   );
@@ -232,8 +236,8 @@ const smokeSigner = async (origin, appId, clients) => {
     `${created.status} ${created.body.reason ?? ""}`,
   );
   const signer = { appId, clientId: created.body.clientId, secret: created.body.secret };
-  writeFileSync(SIGNER_FILE, JSON.stringify(signer), { mode: 0o600 });
-  chmodSync(SIGNER_FILE, 0o600);
+  writeFileSync(file, JSON.stringify(signer), { mode: 0o600 });
+  chmodSync(file, 0o600);
   return signer;
 };
 
@@ -379,6 +383,234 @@ const smokeReports = async (origin, appId, otherAppId, signer, revokedClientId, 
   }
   check(`the large body exceeds ${MAX_BODY} bytes`, large.length > MAX_BODY, large.length);
   return title;
+};
+
+const pngChunk = (type, data) => {
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length);
+  const typed = Buffer.concat([Buffer.from(type, "ascii"), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(typed));
+  return Buffer.concat([length, typed, crc]);
+};
+
+const tinyPng = () => {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(1, 0);
+  header.writeUInt32BE(1, 4);
+  header.set([8, 6, 0, 0, 0], 8);
+  const pixel = Buffer.from([0, 0xd9, 0x4f, 0x2b, 0xff]);
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(pixel)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+};
+
+const signedPost = async (origin, path, signer, payload) => {
+  const body = JSON.stringify(payload);
+  const response = await fetch(`${origin}${path}`, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      "content-type": "application/json",
+      ...signedHeaders(signer.clientId, signer.secret, body),
+    },
+    body,
+  });
+  return { status: response.status, body: await json(response) };
+};
+
+const reserve = (origin, signer, payload) =>
+  signedPost(origin, `/v1/apps/${signer.appId}/uploads`, signer, payload);
+
+const putImage = async (url, contentType, bytes) => {
+  const response = await fetch(url, {
+    method: "PUT",
+    redirect: "manual",
+    headers: { "content-type": contentType },
+    body: bytes,
+  });
+  return {
+    status: response.status,
+    cors: response.headers.get("access-control-allow-origin"),
+    body: await json(response),
+  };
+};
+
+const storedImage = async (origin, signer, png) => {
+  const reserved = await reserve(origin, signer, { contentType: "image/png", size: png.length });
+  const stored = await putImage(reserved.body.uploadUrl, "image/png", png);
+  return { reserved, stored, imageId: reserved.body.imageId };
+};
+
+const uploadUrl = (origin, imageId, exp) => {
+  const secret = readFileSync(UPLOAD_SECRET, "utf8").trim();
+  const sig = createHmac("sha256", secret).update(`${imageId}.${exp}`).digest("hex");
+  return `${origin}/v1/uploads/${imageId}?exp=${exp}&sig=${sig}`;
+};
+
+const smokeUploads = async (origin, appId, otherAppId, signer, github) => {
+  const png = tinyPng();
+  const reserved = await reserve(origin, signer, { contentType: "image/png", size: png.length });
+  const { imageId, uploadUrl: url } = reserved.body;
+  check(
+    `${origin} a signed upload reservation answers 201 with a signed upload URL`,
+    reserved.status === 201 &&
+      imageId?.length === 25 &&
+      url?.startsWith(`${origin}/v1/uploads/${imageId}?exp=`) &&
+      url.includes("&sig=") &&
+      Date.parse(reserved.body.expiresAt) > Date.now(),
+    `${reserved.status} ${JSON.stringify(reserved.body)}`,
+  );
+
+  for (const [label, payload] of [
+    ["a text/plain content type", { contentType: "text/plain", size: 10 }],
+    ["a zero size", { contentType: "image/png", size: 0 }],
+    ["a size over 5 MiB", { contentType: "image/png", size: 5 * 1024 * 1024 + 1 }],
+  ]) {
+    const refused = await reserve(origin, signer, payload);
+    check(
+      `${origin} POST /v1/apps/{appId}/uploads refuses ${label} with 400 InvalidUpload`,
+      refused.status === 400 && refused.body.reason === "InvalidUpload",
+      `${refused.status} ${JSON.stringify(refused.body)}`,
+    );
+  }
+  const unsigned = await fetch(`${origin}/v1/apps/${appId}/uploads`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ contentType: "image/png", size: 1 }),
+  });
+  const unsignedBody = await json(unsigned);
+  check(
+    `${origin} an unsigned upload reservation answers 401 MissingSignature`,
+    unsigned.status === 401 && unsignedBody.reason === "MissingSignature",
+    `${unsigned.status} ${JSON.stringify(unsignedBody)}`,
+  );
+
+  const preflight = await fetch(url, {
+    method: "OPTIONS",
+    redirect: "manual",
+    headers: {
+      Origin: "https://app.example",
+      "Access-Control-Request-Method": "PUT",
+      "Access-Control-Request-Headers": "content-type",
+    },
+  });
+  check(
+    `${origin} OPTIONS on the upload URL answers with the CORS headers`,
+    preflight.status === 204 &&
+      preflight.headers.get("access-control-allow-origin") === "*" &&
+      preflight.headers.get("access-control-allow-methods") === "PUT" &&
+      preflight.headers.get("access-control-allow-headers") === "content-type",
+    `${preflight.status} ${JSON.stringify(Object.fromEntries(preflight.headers))}`,
+  );
+
+  const tampered = url.replace(/sig=([0-9a-f])/, (_, first) => `sig=${first === "0" ? "1" : "0"}`);
+  const exp = Math.floor(Date.now() / 1000);
+  for (const [label, target, contentType, status, reason] of [
+    ["a tampered sig", tampered, "image/png", 401, "BadSignature"],
+    ["an exp in the past", uploadUrl(origin, imageId, exp - 10), "image/png", 410, "UploadExpired"],
+    ["the wrong content type", url, "image/jpeg", 415, "WrongContentType"],
+  ]) {
+    const refused = await putImage(target, contentType, png);
+    check(
+      `${origin} PUT /v1/uploads/{imageId} refuses ${label} with ${status} ${reason}`,
+      refused.status === status && refused.body.reason === reason && refused.cors === "*",
+      `${refused.status} ${refused.cors} ${JSON.stringify(refused.body)}`,
+    );
+  }
+  const tooLarge = await putImage(url, "image/png", Buffer.concat([png, Buffer.alloc(1)]));
+  check(
+    `${origin} PUT /v1/uploads/{imageId} refuses a body over the reserved size with 413 TooLarge`,
+    tooLarge.status === 413 && tooLarge.body.reason === "TooLarge",
+    `${tooLarge.status} ${JSON.stringify(tooLarge.body)}`,
+  );
+
+  const reservedImage = await fetch(`${origin}/v1/images/${imageId}`, { redirect: "manual" });
+  await reservedImage.arrayBuffer();
+  check(
+    `${origin} GET /v1/images/{imageId} answers 404 before the bytes arrive`,
+    reservedImage.status === 404,
+    `${reservedImage.status}`,
+  );
+
+  const stored = await putImage(url, "image/png", png);
+  check(
+    `${origin} PUT /v1/uploads/{imageId} stores the image with 200`,
+    stored.status === 200 && stored.body.imageId === imageId && stored.cors === "*",
+    `${stored.status} ${stored.cors} ${JSON.stringify(stored.body)}`,
+  );
+  const again = await putImage(url, "image/png", png);
+  check(
+    `${origin} a second PUT answers 409 AlreadyStored`,
+    again.status === 409 && again.body.reason === "AlreadyStored",
+    `${again.status} ${JSON.stringify(again.body)}`,
+  );
+
+  const image = await fetch(`${origin}/v1/images/${imageId}`, { redirect: "manual" });
+  const served = Buffer.from(await image.arrayBuffer());
+  check(
+    `${origin} GET /v1/images/{imageId} returns the same bytes and content type`,
+    image.status === 200 &&
+      image.headers.get("content-type") === "image/png" &&
+      image.headers.get("cache-control") === "public, max-age=31536000, immutable" &&
+      served.equals(png),
+    `${image.status} ${image.headers.get("content-type")} ${served.length} bytes`,
+  );
+
+  const pending = await reserve(origin, signer, { contentType: "image/png", size: png.length });
+  const otherDetail = await api(origin, "GET", `/api/apps/${otherAppId}`);
+  const otherSigner = await smokeSigner(
+    origin,
+    otherAppId,
+    Array.isArray(otherDetail.body.clients) ? otherDetail.body.clients : [],
+    OTHER_SIGNER_FILE,
+  );
+  const foreign = await storedImage(origin, otherSigner, png);
+  check(
+    `${origin} another app stores its own image`,
+    foreign.stored.status === 200,
+    `${foreign.reserved.status} ${foreign.stored.status} ${JSON.stringify(foreign.stored.body)}`,
+  );
+
+  const title = `Smoke screenshot ${commit.slice(0, 7)} ${new Date().toISOString()}`;
+  const reportPath = `/v1/apps/${appId}/reports`;
+  const accepted = await signedPost(origin, reportPath, signer, {
+    title,
+    body: "Sent by npm run smoke",
+    images: [imageId],
+  });
+  check(
+    `${origin} a report naming a stored image answers 202`,
+    accepted.status === 202 && accepted.body.reportId?.length === 25,
+    `${accepted.status} ${JSON.stringify(accepted.body)}`,
+  );
+  const found = await delivered(origin, appId, accepted.body.reportId);
+  check(
+    `${origin} GET /api/apps/{appId}/reports lists the image under images`,
+    JSON.stringify(found.row?.images) === JSON.stringify([imageId]),
+    JSON.stringify(found.row),
+  );
+  if (github) closeRowIssue(found.row);
+
+  for (const [label, id] of [
+    ["a Reserved image", pending.body.imageId],
+    ["another app's image", foreign.imageId],
+    ["an image of another report", imageId],
+    ["an unknown image", UNKNOWN_ID],
+  ]) {
+    const refused = await signedPost(origin, reportPath, signer, { title, images: [id] });
+    check(
+      `${origin} a report naming ${label} answers 400 InvalidReport with the id`,
+      refused.status === 400 &&
+        refused.body.reason === "InvalidReport" &&
+        refused.body.message?.includes(id),
+      `${refused.status} ${JSON.stringify(refused.body)}`,
+    );
+  }
 };
 
 const SLACK_POSTED = "slackPosted is true and the report is Filed";

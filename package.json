@@ -24,6 +24,7 @@
     "access:env": "node npm-scripts/access-env.mjs",
     "access:lookup": "node npm-scripts/access-lookup.mjs",
     "secret": "node npm-scripts/secret.mjs",
+    "upload-secret": "node npm-scripts/upload-secret.mjs",
     "smoke": "node npm-scripts/smoke.mjs",
     "test:rust": "cargo test --workspace",
     "report": "node npm-scripts/report.mjs"
