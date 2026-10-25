@@ -6,7 +6,11 @@ use crate::random;
 use crate::sign::SigningClient;
 
 const APP_SELECT: &str = "SELECT a.app_id, a.name, a.description, a.github_app_id, \
-     a.github_installation_id, a.github_repo, a.created_at, s.workspace_id, s.channel \
+     a.github_installation_id, a.github_repo, a.created_at, s.workspace_id, s.channel, \
+     (SELECT COUNT(*) FROM client c WHERE c.app_id = a.app_id AND c.status = 'Active') AS clients, \
+     (SELECT COUNT(*) FROM report r WHERE r.app_id = a.app_id AND r.status = 'Pending') AS pending, \
+     (SELECT COUNT(*) FROM report r WHERE r.app_id = a.app_id AND r.status = 'Filed') AS filed, \
+     (SELECT COUNT(*) FROM report r WHERE r.app_id = a.app_id AND r.status = 'Failed') AS failed \
      FROM app a LEFT JOIN slack_channel s ON s.app_id = a.app_id";
 
 const CLIENT_SELECT: &str = "SELECT client_id, name, status, created_at FROM client";
