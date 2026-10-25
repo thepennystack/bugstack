@@ -36,9 +36,9 @@ POST a JSON object with a `title` to `/v1/apps/{appId}/reports` with three heade
 - `X-Bugstack-Timestamp`: Unix seconds, within 300 s of now
 - `X-Bugstack-Signature`: lower-case hex `HMAC-SHA256(secret, "{timestamp}.{raw body}")`
 
-To attach screenshots, the backend first POSTs `{contentType, size}`, signed the same way, to `/v1/apps/{appId}/uploads` and hands the returned `uploadUrl` to the browser. The browser PUTs the image bytes there with that `content-type` within 15 minutes. The backend then names the ids in the report as `images: [imageId]`, at most 10, and the issue embeds each one.
+To attach screenshots, declare them in the report as `images: [{contentType, size}]`, at most 10. The 202 answer carries one `uploadUrl` per image; hand them to the browser, which PUTs each image's bytes with that `content-type` within 15 minutes. The issue is filed at once and updated as each image arrives.
 
-`npm run report` signs and sends one; `--image <path>` uploads a screenshot first.
+`npm run report` signs and sends one; `--image <path>` declares a screenshot and uploads it after the report.
 
 ## Setup
 

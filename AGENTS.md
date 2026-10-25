@@ -52,17 +52,18 @@ The admin app keeps its response types by hand in `apps/admin/src/api.ts`. A 401
 
 `POST /v1/apps/{appId}/reports` (`ingest.rs`) takes a JSON object of at most 60 KiB with a `title` of 1 to 200 characters; every other key stays in `payload`. The client signs it with `X-Bugstack-Client` (client id), `X-Bugstack-Timestamp` (Unix seconds, within 300 s) and `X-Bugstack-Signature`: lower-case hex HMAC-SHA256 over `"{timestamp}.{raw body}"`, keyed with the UTF-8 bytes of the client secret. `sign.rs` holds the check and its test. Refusals in order: 413 `TooLarge`; 401 `MissingSignature`, `StaleTimestamp`, `UnknownClient` (unknown, revoked or another app's), `BadSignature`; 400 `InvalidReport`. Success is 202 `{reportId}` and a `Pending` row, delivered at once under `ctx.wait_until`.
 
-`images` is an optional array of at most 10 image ids; each must be `Stored`, belong to the same app and to no other report, else 400 `InvalidReport` naming the id. They become `report_image` rows in order and embed in the issue body as `![screenshot {n}](https://bugstack.kattebak.fyi/v1/images/{imageId})`.
+`images` optionally declares up to 10 screenshots as `[{contentType, size}]`: PNG, JPEG, WebP or GIF, 1 byte to 5 MiB, else 400 `InvalidReport`. Each becomes a `Reserved` `image` row with its `position`, and the 202 answer adds `uploads: [{imageId, uploadUrl, expiresAt}]` in the same order.
 
-`BUGSTACK_CLIENT_SECRET=… npm run report -- <origin> <appId> <clientId> "<title>" [--error <text>] [--body <text>] [--image <path>]…` uploads each image, then signs one report with `npm-scripts/sign.mjs` and prints the response. Smoke keeps its signing client `smoke-signer` in `~/.config/bugstack/smoke-client` (mode 600), and reuses the revoked `smoke-revoke` and the app `bugstack-smoke-other`.
+`BUGSTACK_CLIENT_SECRET=… npm run report -- <origin> <appId> <clientId> "<title>" [--error <text>] [--body <text>] [--image <path>]…` signs one report declaring each image, then PUTs each file to its upload URL, with `npm-scripts/sign.mjs` and prints the response. Smoke keeps its signing client `smoke-signer` in `~/.config/bugstack/smoke-client` (mode 600), and reuses the revoked `smoke-revoke` and the app `bugstack-smoke-other`.
 
 ## Uploads
 
-`uploads.rs` serves three routes; R2 bucket `bugstack-images` (binding `IMAGES`) holds the bytes at key `imageId`, the `image` table the state.
+`uploads.rs` serves two routes; R2 bucket `bugstack-images` (binding `IMAGES`) holds the bytes at key `imageId`, the `image` table the state.
 
-- `POST /v1/apps/{appId}/uploads`, signed and refused exactly like a report: `{contentType, size}` with a PNG, JPEG, WebP or GIF type and 1 byte to 5 MiB, else 400 `InvalidUpload`. It reserves an image and answers 201 `{imageId, uploadUrl, expiresAt}`.
-- `PUT /v1/uploads/{imageId}?exp&sig` stores the bytes and answers 200 `{imageId}`. `sig` is hex HMAC-SHA256 over `"{imageId}.{exp}"` keyed with the Worker secret `UPLOAD_SIGNING_SECRET`; `exp` is 900 s after the reservation. Refusals in order: 401 `BadSignature`, 410 `UploadExpired`, 404 `NotFound`, 409 `AlreadyStored`, 415 `WrongContentType`, 413 `TooLarge`. This route and its `OPTIONS` preflight are the only ones with CORS (any origin).
+- `PUT /v1/uploads/{imageId}?exp&sig` stores the bytes and answers 200 `{imageId}`. `sig` is hex HMAC-SHA256 over `"{imageId}.{exp}"` keyed with the Worker secret `UPLOAD_SIGNING_SECRET`; `exp` is 900 s after the report. Refusals in order: 401 `BadSignature`, 410 `UploadExpired`, 404 `NotFound`, 409 `AlreadyStored`, 415 `WrongContentType`, 413 `TooLarge`. This route and its `OPTIONS` preflight are the only ones with CORS (any origin). A stored image sets a `Filed` report back to `Pending` and delivers it again; a `Pending` or `Failed` report picks the image up on its own next attempt.
 - `GET /v1/images/{imageId}` streams a `Stored` image, cached as immutable for a year; anything else is 404. The unguessable id is the access control.
+
+The issue body embeds each `Stored` image in `position` order as `![screenshot {n}](https://bugstack.kattebak.fyi/v1/images/{imageId})`, after `body`; a `Reserved` image is never mentioned. `github_issue.image_count` records how many the body held at its last write; when more are stored, delivery PATCHes the issue body, and a failure there is a `GitHub` failure with the usual backoff. `ReportRow.images` lists stored ids only.
 
 ## Delivery
 
