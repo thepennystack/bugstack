@@ -9,10 +9,13 @@ import {
   createClient,
   getApp,
   isSecretMissing,
+  type LastFailure,
   listApps,
   listInstallations,
   listReports,
   listRepos,
+  type ReportRow,
+  retryReport,
   revokeClient,
   updateApp,
 } from "./api";
@@ -369,6 +372,33 @@ const RevokeButton = ({ appId, clientId }: { appId: string; clientId: string }) 
   );
 };
 
+const FailureCell = ({ failure }: { failure: LastFailure | null }) => {
+  if (failure === null) return null;
+  return (
+    <>
+      {failure.step} at {failure.failedAt}
+      <br />
+      <code>{failure.message}</code>
+    </>
+  );
+};
+
+const RetryButton = ({ appId, report }: { appId: string; report: ReportRow }) => {
+  const queryClient = useQueryClient();
+  const retry = useMutation({
+    mutationFn: () => retryReport(report.reportId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: [...appKey(appId), "reports"] }),
+  });
+  return (
+    <>
+      <button type="button" disabled={retry.isPending} onClick={() => retry.mutate()}>
+        {retry.isPending ? "Retrying…" : "Retry"}
+      </button>
+      {retry.isError && <Failure what="Retrying the report" error={retry.error} />}
+    </>
+  );
+};
+
 const Reports = ({ appId }: { appId: string }) => {
   const reports = useQuery({
     queryKey: [...appKey(appId), "reports"],
@@ -390,6 +420,9 @@ const Reports = ({ appId }: { appId: string }) => {
           <th>Attempts</th>
           <th>Received</th>
           <th>Client</th>
+          <th>Issue</th>
+          <th>Last failure</th>
+          <th />
         </tr>
       </thead>
       <tbody>
@@ -400,6 +433,17 @@ const Reports = ({ appId }: { appId: string }) => {
             <td>{report.attempts}</td>
             <td>{report.receivedAt}</td>
             <td>{report.clientName}</td>
+            <td>
+              {report.issueUrl !== null && (
+                <a href={report.issueUrl} target="_blank" rel="noreferrer">
+                  {report.issueUrl.replace("https://github.com/", "")}
+                </a>
+              )}
+            </td>
+            <td>
+              <FailureCell failure={report.lastFailure} />
+            </td>
+            <td>{report.status === "Failed" && <RetryButton appId={appId} report={report} />}</td>
           </tr>
         ))}
       </tbody>

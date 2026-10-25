@@ -64,6 +64,7 @@ export type ReportRow = {
   attempts: number;
   receivedAt: string;
   clientName: string;
+  nextAttemptAt: string;
   issueUrl: string | null;
   slackPosted: boolean;
   lastFailure: LastFailure | null;
@@ -141,6 +142,7 @@ const isReportRow: Guard<ReportRow> = (value): value is ReportRow =>
   typeof value.attempts === "number" &&
   typeof value.receivedAt === "string" &&
   typeof value.clientName === "string" &&
+  typeof value.nextAttemptAt === "string" &&
   (value.issueUrl === null || typeof value.issueUrl === "string") &&
   typeof value.slackPosted === "boolean" &&
   (value.lastFailure === null || isLastFailure(value.lastFailure));
@@ -229,6 +231,9 @@ export const revokeClient = (clientId: string): Promise<Client> =>
 
 export const listReports = (appId: string): Promise<ReportRow[]> =>
   request("GET", `/api/apps/${encodeURIComponent(appId)}/reports`, listOf(isReportRow));
+
+export const retryReport = (reportId: string): Promise<ReportRow> =>
+  request("POST", `/api/reports/${encodeURIComponent(reportId)}/retry`, isReportRow, {});
 
 export const listInstallations = (): Promise<Installation[]> =>
   request("GET", "/api/github/installations", listOf(isInstallation));
