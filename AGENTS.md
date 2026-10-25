@@ -23,11 +23,19 @@ bugstack takes signed bug reports from app backends and files each as a GitHub i
 | `npm run access:env`                 | Write the service token to `~/.config/bugstack/access-env` (mode 600)                                     |
 | `npm run access:lookup`              | Print the PIN provider id and team domain                                                                 |
 | `npm run secret -- <NAME>`           | Pipe stdin to `wrangler secret put`                                                                       |
-| `npm run smoke [-- <sha>]`           | Check `/v1/health`, Access, `/api/me`, the 415 rule and the admin shell on both hosts                     |
+| `npm run smoke [-- <sha>]`           | Check health, Access, the admin API on both hosts, then render the pages in headless Chromium             |
 
 ## Admin API
 
-Every `/api/*` request verifies the Access JWT (`Cf-Access-Jwt-Assertion`, else the `CF_Authorization` cookie) in `crates/server/src/auth.rs`, then admits only `ADMIN_EMAIL` or the service token whose `common_name` is `ADMIN_CLIENT_ID`; anything else is 401 `Unauthorized`. POST and PUT, and DELETE with a body, need `content-type: application/json`, else 415; an empty body reads as `{}`. Empty `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` disable the check for `wrangler dev`. Version preview URLs (`<version>-bugstack.matthijs-f49.workers.dev`) sit outside Access, so the Worker check is their only gate; smoke sends a forged JWT there.
+Every `/api/*` request verifies the Access JWT (`Cf-Access-Jwt-Assertion`, else the `CF_Authorization` cookie) in `crates/server/src/auth.rs`, then admits only `ADMIN_EMAIL` or the service token whose `common_name` is `ADMIN_CLIENT_ID`; anything else is 401 `Unauthorized`. POST and PUT, and DELETE with a body, need `content-type: application/json`, else 415; an empty body reads as `{}`. Empty `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` disable the check for `wrangler dev`. `preview_urls` is off in `wrangler.jsonc`: version preview hostnames sit outside Access, and smoke checks they no longer reach the Worker.
+
+Routes live in `crates/server/src/routes.rs`, D1 queries in `store.rs`, GitHub App calls in `github.rs`:
+
+- `GET /api/github/installations`, `GET /api/github/installations/{id}/repos`
+- `GET`/`POST /api/apps`, `GET`/`PUT /api/apps/{appId}`
+- `POST /api/apps/{appId}/clients` returns the secret once; `POST /api/clients/{clientId}/revoke`
+
+Bad input is 400 `Invalid`, an unknown id 404 `NotFound`. A missing GitHub secret is 503 `SecretMissing`; set both from the GitHub App settings with `echo <app id> | npm run secret -- GITHUB_APP_ID` and `openssl pkcs8 -topk8 -nocrypt -in <key>.pem | npm run secret -- GITHUB_APP_PRIVATE_KEY`. `migrations/0001_init.sql` holds the whole schema. Smoke reuses the app `bugstack-smoke` and its client `agent`; seed only through the API.
 
 The admin app keeps its response types by hand in `apps/admin/src/api.ts`. A 401 renders the signed-out notice; any other failure renders a notice with a prefilled issue link.
 
